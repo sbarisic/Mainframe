@@ -7,7 +7,7 @@ namespace Mainframe.Client
         static async Task Main(string[] args)
         {
             var builder = WebAssemblyHostBuilder.CreateDefault(args);
-
+            builder.Services.AddBlazorBootstrap();
             await builder.Build().RunAsync();
         }
     }

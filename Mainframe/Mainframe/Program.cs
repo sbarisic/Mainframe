@@ -1,5 +1,7 @@
 using Mainframe.Client.Pages;
 using Mainframe.Components;
+using BlazorBootstrap;
+
 
 namespace Mainframe
 {
@@ -13,6 +15,8 @@ namespace Mainframe
             builder.Services.AddRazorComponents()
                 .AddInteractiveServerComponents()
                 .AddInteractiveWebAssemblyComponents();
+
+            builder.Services.AddBlazorBootstrap();
 
             var app = builder.Build();
 

@@ -4,7 +4,7 @@
 @using Blazor.Extensions.Canvas.Canvas2D
 @using Blazor.Extensions.Canvas.WebGL
 @using System.Drawing
-@rendermode InteractiveWebAssembly
+@rendermode InteractiveServer
 
 @inject IJSRuntime JsRuntime
 
@@ -44,9 +44,7 @@
 	[JSInvokable]
 	public async ValueTask GameLoop(float timeStamp)
 	{
-		Console.WriteLine("Game Loop!");
-
-		await canvas.ClearRectAsync(0, 0, glWidth, glHeight);
+		//await canvas.ClearRectAsync(0, 0, glWidth, glHeight);
 
 		await canvas.SetFillStyleAsync("green");
 		await canvas.FillRectAsync(0, 0, glWidth, glHeight);
