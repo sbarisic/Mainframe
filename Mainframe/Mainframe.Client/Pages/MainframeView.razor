@@ -1,0 +1,57 @@
+﻿@page "/mainframeView"
+@using Mainframe
+@using Blazor.Extensions
+@using Blazor.Extensions.Canvas.Canvas2D
+@using Blazor.Extensions.Canvas.WebGL
+@using System.Drawing
+@rendermode InteractiveWebAssembly
+
+@inject IJSRuntime JsRuntime
+
+<PageTitle>MainframeVew</PageTitle>
+
+<h1>Mainframe View</h1>
+
+<BECanvas Width="800" Height="600" @ref="canvasRef"></BECanvas>
+
+
+@code {
+	//protected WebGLContext webGL;
+	protected Canvas2DContext canvas;
+	protected BECanvasComponent canvasRef;
+
+	protected int glWidth;
+	protected int glHeight;
+
+
+	protected override async Task OnAfterRenderAsync(bool firstRender)
+	{
+		if (firstRender)
+		{
+			Console.WriteLine("First render!");
+			await JsRuntime.InvokeAsync<IJSObjectReference>("import", "./scr.js?v=" + (DateTime.Now.ToString("yyyyMMddHHmmss")));
+
+			glWidth = (int)canvasRef.Width;
+			glHeight = (int)canvasRef.Height;
+			canvas = await canvasRef.CreateCanvas2DAsync();
+
+			await JsRuntime.InvokeAsync<object>("initGame", DotNetObjectReference.Create(this));
+		}
+
+		Console.WriteLine("Render!");
+	}
+
+	[JSInvokable]
+	public async ValueTask GameLoop(float timeStamp)
+	{
+		Console.WriteLine("Game Loop!");
+
+		await canvas.ClearRectAsync(0, 0, glWidth, glHeight);
+
+		await canvas.SetFillStyleAsync("green");
+		await canvas.FillRectAsync(0, 0, glWidth, glHeight);
+
+		await canvas.SetFontAsync("24px verdana");
+		await canvas.StrokeTextAsync($"time: {timeStamp}", 20, 80);
+	}
+}
