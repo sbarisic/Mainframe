@@ -27,32 +27,96 @@ implemented. All commands and contracts below are proposals, not available APIs.
 ## Layers and project boundaries
 
 ```text
-CLI / interactive console / future Windows filesystem adapter
-                           |
-                    Mainframe client
-                           |
-             Kernel API and syscall dispatcher
-                    /                  \
-          Local module handler    Remote kernel connection
-                    |                  |
-             Storage / jobs / devices / services
+mf terminal client -- TCP/TLS --> Host-side shell and process execution
+                                       |
+                              Ordinary program process
+                                       |
+                           Language SDK -- TCP/TLS
+                                       |
+Windows filesystem adapter --> Kernel API and syscall dispatcher
+                                  /                  \
+                        Local handler          Remote kernel
 ```
 
 Proposed projects:
 
 | Project | Responsibility |
 | --- | --- |
-| Mainframe.Cli | Command parsing and presentation |
+| Mainframe.Cli | Local connection options, terminal I/O, one-shot execution |
 | Mainframe.Contracts | Versioned requests, responses, resource IDs, errors |
 | Mainframe.Core | Dispatch, namespace, authorization, module contracts |
-| Mainframe.Host | Persistent kernel process (`mfd`) and network endpoints |
-| Mainframe.Client | Connections, authentication, routing, streaming |
+| Mainframe.Host | Persistent kernel (`mfd`), host-side shell, process supervision, endpoints |
+| Mainframe.Client | .NET session/RPC client, authentication, streaming |
 | Future adapter project | Windows filesystem integration |
 
-CLI commands are wrappers around typed syscall contracts. For example, `mf cat`
-performs open/read/close operations. The Windows adapter calls the same API; it
-must not launch CLI subprocesses and parse their output. Keep the core independent
-of Windows filesystem integration.
+The planned CLI is a thin remote terminal. The host-side shell parses mainframe
+commands and starts programs; programs call typed kernel contracts through an SDK.
+For example, the `cat` program performs open/read/close operations. The Windows
+adapter calls the filesystem API directly; it must not launch CLI subprocesses
+and parse terminal output. Keep the core independent of Windows integration.
+
+## Remote shell and ordinary programs
+
+Use TCP with TLS for all client/kernel and kernel/kernel connections, including
+loopback connections. There is no separate named-pipe transport in the initial
+design. The client selects an endpoint; it need not know the cluster topology.
+
+Proposed interaction:
+
+```text
+mf connect server:7443
+atlas> weather
+atlas> bank
+atlas> cat /vol/documents/report.txt
+
+# One-shot execution from the host OS shell:
+mf --endpoint server:7443 exec cat /vol/documents/report.txt
+```
+
+`mf connect` opens an interactive remote shell. The mainframe shell owns the
+logical working directory, environment, and command registry. One-shot execution
+forwards arguments, streams, and the program's exit code. Endpoint persistence and
+exact command syntax remain to be specified.
+
+Programs are ordinary OS processes written in .NET or another language. A program
+manifest declares its command name, launch information, OS/architecture/runtime
+requirements, and required capabilities. The selected host starts the process.
+The .NET runtime or a compatible self-contained build is still required for .NET
+programs; native programs must match the execution host.
+
+Keep two independent communication paths:
+
+- Execution sessions relay stdin, stdout, stderr, input closure, cancellation,
+  process exit status, and terminal metadata such as resize events.
+- A separate program-to-kernel socket carries syscalls. Printing output or reading
+  input must never interfere with RPC framing.
+
+The same transport and framing can support terminal, program RPC, peer, and
+filesystem client sessions, with different permissions and message contracts.
+Scripted execution preserves separate stdout/stderr streams and exact bytes.
+Arbitrary interactive native applications may require host-side pseudoterminals;
+start with a simple shell and stream-based programs, and define interactive echo,
+control-key handling, and terminal behavior explicitly.
+
+The host supplies the kernel endpoint, logical working directory, mainframe and
+execution identities, arguments, and scoped short-lived authentication context.
+Pass non-secret configuration through environment variables; use a protected
+bootstrap mechanism for credentials rather than command-line arguments. Programs
+normally call their local kernel, which routes remote resource requests.
+
+Define language-neutral, versioned contracts using portable types rather than
+.NET object serialization. A .NET SDK can expose ordinary async methods and
+streams, with equivalent libraries or generated clients for other languages.
+
+Ordinary OS file APIs still access the host filesystem. Programs use the mainframe
+SDK for its namespace, or an OS-mounted mainframe filesystem once available.
+Kernel RPC permissions do not sandbox an OS process: start with trusted programs
+and add execution isolation separately.
+
+Initially, cancel ordinary foreground commands when their terminal session is
+lost; explicitly submitted background jobs survive terminal disconnection.
+Cancellation is best effort during network failures, not proof that a remote
+process stopped. Persistent, reconnectable interactive sessions can come later.
 
 ## Kernel capabilities and modules
 
@@ -79,8 +143,10 @@ the same semantics as a persistent file.
 ## Peer connections and syscall protocol
 
 Start with explicit peer addresses over a LAN or VPN and direct connections.
-Use persistent authenticated connections; TCP with TLS is the initial transport
-direction. Choose the RPC framework and serialization format before implementation.
+Use persistent authenticated TCP/TLS connections on Linux and Windows. Choose the
+RPC framework and serialization format before implementation. Explicit framing
+must delimit messages because TCP supplies a byte stream. A length-prefixed JSON
+envelope with binary data frames is one candidate, not a final protocol decision.
 Exchange identity, compatible protocol versions, and capability manifests during
 the handshake. Define manifest updates and invalidation when modules change or
 peers disconnect.
@@ -105,13 +171,22 @@ deduplication rules. Bound forwarding to prevent routing loops.
 Normal operations name logical resources, not their physical host:
 
 ```text
-mf ls /vol/projects
-mf cat /vol/projects/readme.txt
-mf jobs
-mf services
+atlas> ls /vol/projects
+atlas> cat /vol/projects/readme.txt
+atlas> jobs
+atlas> services
 ```
 
-The registry associates syscall providers with resource scopes and readiness:
+Keep three logical directories with distinct responsibilities:
+
+| Directory | Purpose |
+| --- | --- |
+| Programs | Locate hosts able to execute a registered command |
+| Resources | Resolve volume paths and devices to their authoritative owners |
+| Capabilities | Discover syscall contracts and features provided by each kernel |
+
+Program execution placement and syscall routing are independent decisions.
+The capability registry associates providers with resource scopes and readiness:
 
 ```text
 fs.read       storage-01    volume:archive    ready
@@ -126,12 +201,51 @@ solely because it supports the syscall name. Support explicit targeting when an
 operator needs a particular node.
 
 The dispatcher selects a local handler or remote connection. Open file handles
-retain owning node and session identity. Define close, timeout, and node-restart
+retain owning node, session identity, and execution generation. Define close, timeout, and node-restart
 behavior so stale handles cannot accidentally reference new resources.
 
 Administrative commands expose physical topology: `mf nodes`, `mf node inspect`,
 `mf volume inspect`, and `mf job inspect`. One logical machine should not hide
 failures or make diagnosis difficult.
+
+### Two-machine example
+
+Machine A hosts `weather` and `cat`; machine B hosts `bank` and the storage provider
+for `/vol/documents`. An authenticated terminal connected to either kernel can
+execute any registered program for which its user has permission.
+
+When connected to A, executing `bank` uses the program directory to select B:
+
+```text
+Terminal -> Kernel A -> Kernel B -> bank process
+         <-          <-          <- stdout/stderr and exit status
+```
+
+Input and cancellation travel toward the process. Initially, relay session I/O
+through the entry kernel rather than requiring direct client connections to every
+execution host. Optimized routes can be added later.
+
+Executing `cat /vol/documents/report.txt` can run `cat` on A while serving file
+operations on B:
+
+```text
+cat on A -> Kernel A -> Kernel B -> Storage provider
+           fs.open      owns /vol/documents
+
+Storage -> Kernel B -> Kernel A -> cat -> stdout -> Terminal
+```
+
+Open returns an opaque handle whose reads, seeks, and close calls route to B.
+User identity and delegated permissions follow both execution and RPC calls.
+The `/vol` listing comes from the shared mount namespace; `/vol/documents`
+enumeration is delegated to B. Never choose an arbitrary filesystem provider
+solely because it implements `fs.open` or `fs.list`.
+
+Acceptance scenario: connect to either kernel, run `weather` on A and `bank` on B,
+and run `cat` on A against a file on B with correct content, stream routing, and
+exit status. Use fixture programs and synthetic account data for these tests;
+this example does not require a real banking integration. Also verify permission
+denials, owner disconnection, cancellation, and stale handle rejection.
 
 ## Namespace and storage
 
@@ -156,9 +270,9 @@ with persistent files and stable status documents; define stream behavior separa
 Distinguish internal provider mounts from Windows exports:
 
 ```text
-mf mount archive /vol/archive
-mf export / --drive M:
-mf export /vol/archive --directory C:\Mainframe\Archive
+atlas> mount archive /vol/archive
+atlas> export / --drive M:
+atlas> export /vol/archive --directory C:\Mainframe\Archive
 ```
 
 Start with one authoritative owner per volume and remote access from other nodes.
@@ -194,13 +308,14 @@ network split while maintaining one consistent writable system.
 ## Jobs and services
 
 Provide durable job IDs, a job spool, progress, logs, cancellation, and explicit
-retry policies. Jobs should survive a CLI disconnect. Placement can consider
+retry policies. Explicit background jobs should survive a CLI disconnect;
+ordinary foreground sessions follow the cancellation policy above. Placement can consider
 memory, GPU capability, installed tools, data locality, and attached devices.
 
 ```text
-mf run index-documents --volume projects
-mf run render-scene --requires gpu
-mf job logs job-0042 --follow
+atlas> run index-documents --volume projects
+atlas> run render-scene --requires gpu
+atlas> job logs job-0042 --follow
 ```
 
 An individual program runs on one host unless designed to split its work. RAM and
@@ -216,7 +331,7 @@ ownership rules before enabling automatic reassignment.
 - An event journal records administrative actions and lifecycle transitions.
 - Snapshots expose historical read-only volume views.
 - Recovery mode starts a minimal maintenance environment.
-- A future `mf console` provides an interactive station-style interface.
+- Enhance the remote shell with a station-style presentation after basic sessions work.
 - Machine-readable output supports scripts independently of terminal styling.
 
 These are later features; do not expand the first peer milestone to include them.
@@ -239,15 +354,20 @@ content. Select the adapter based on the required filesystem semantics.
 
 1. **CLI foundation (implemented).** Keep commands modular; extend the argument
    contract as real operations are introduced.
-2. **Local kernel.** Add contracts, host, client, and dispatcher. Implement identity,
-   health, and capability discovery through the API. CLI status reports live state.
+2. **Local kernel and remote shell.** Add contracts, host, client, and dispatcher
+   over loopback TCP/TLS. Implement identity, health, and capability discovery.
+   Add host-side command execution and a thin terminal client forwarding streams,
+   cancellation, and exit codes. Verify a normal .NET program can call the kernel
+   SDK over its own authenticated connection. Status reports live state.
 3. **Two linked kernels.** Establish authenticated peers, exchange manifests, and
    route a remote read-only syscall. Both CLIs show the same mainframe identity and
    both nodes. Verify incompatible versions, unauthorized peers, disconnection,
-   deadlines, and reconnection without stale registry entries.
+   deadlines, and reconnection without stale registry entries. Register programs
+   per host and relay a remote process's I/O through either entry kernel.
 4. **Shared namespace and owner-based storage.** Add internal mounts and file
    operations; read/write a volume through either node. Verify permissions,
-   concurrent access, owner loss, and stale handles.
+   concurrent access, owner loss, and stale handles. Complete the two-machine
+   weather/bank/cat fixture scenario, including `cat` on A reading storage on B.
 5. **Distributed jobs.** Add durable submission, placement, logs, cancellation,
    and explicit failure/retry rules. Verify ambiguous outcomes and worker loss.
 6. **Windows export.** Implement the selected adapter against the same client API.
@@ -262,6 +382,8 @@ content. Select the adapter based on the required filesystem semantics.
 - Persistent metadata format and coordinator implementation.
 - File naming, consistency, caching, locking, and durability contracts.
 - Execution isolation and supported job/module formats.
+- Program registration, name conflicts, version selection, and execution manifests.
+- Foreground session lifecycle, pseudoterminal support, and credential bootstrap.
 - Whether a distributed actor framework such as Orleans is useful for services;
   it is a candidate, not a dependency decision or a substitute for storage semantics.
 
