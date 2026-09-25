@@ -16,6 +16,8 @@
     <Description>Modular Mainframe command-line interface.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../Mainframe.Client/Mainframe.Client.csproj" />
+    <ProjectReference Include="../Mainframe.Core/Mainframe.Core.csproj" />
     <None Include="../../LICENSE" Link="LICENSE" Pack="true" PackagePath="" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="../../README.md" Pack="true" PackagePath="" />
   </ItemGroup>

@@ -1,5 +1,12 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Mainframe.Cli/Mainframe.Cli.csproj" />
+    <Project Path="src/Mainframe.Client/Mainframe.Client.csproj" />
+    <Project Path="src/Mainframe.Core/Mainframe.Core.csproj" />
+    <Project Path="src/Mainframe.Host/Mainframe.Host.csproj" />
+    <Project Path="src/Mainframe.Protocol/Mainframe.Protocol.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Mainframe.Tests/Mainframe.Tests.csproj" />
   </Folder>
 </Solution>

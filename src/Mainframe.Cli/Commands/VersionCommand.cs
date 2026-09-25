@@ -6,13 +6,19 @@ public sealed class VersionCommand : ICommand
 {
     public string Name => "version";
     public string Description => "Show the CLI version.";
-    public string Usage => "mf version";
+    public string Usage => "mf version [--json]";
 
-    public int Execute(TextWriter output)
+    public Task<int> ExecuteAsync(CommandContext context, CancellationToken cancellationToken)
     {
+        context.RequireNoArguments(Usage);
+        context.Validate(Usage, "--json");
+        cancellationToken.ThrowIfCancellationRequested();
         var version = typeof(VersionCommand).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion;
-        output.WriteLine($"mf {version}");
-        return 0;
+        if (context.Json)
+            context.WriteJson(new { name = "mf", version });
+        else
+            context.Output.WriteLine($"mf {version}");
+        return Task.FromResult(0);
     }
 }

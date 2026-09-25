@@ -1,10 +1,10 @@
 namespace Mainframe.Cli.Commands;
 
-/// <summary>A CLI operation. Future commands can call a shared kernel client here.</summary>
+/// <summary>A CLI operation with parsed options and cancellable execution.</summary>
 public interface ICommand
 {
     string Name { get; }
     string Description { get; }
     string Usage { get; }
-    int Execute(TextWriter output);
+    Task<int> ExecuteAsync(CommandContext context, CancellationToken cancellationToken);
 }

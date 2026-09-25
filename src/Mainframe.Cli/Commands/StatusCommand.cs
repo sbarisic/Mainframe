@@ -1,18 +1,26 @@
 namespace Mainframe.Cli.Commands;
 
-public sealed class StatusCommand : ICommand
+public sealed class StatusCommand : KernelCommand
 {
-    public string Name => "status";
-    public string Description => "Show the implemented system components.";
-    public string Usage => "mf status";
+    public override string Name => "status";
+    public override string Description => "Query the running kernel's identity and health.";
 
-    public int Execute(TextWriter output)
+    protected override async Task ExecuteConnectedAsync(KernelConnection connection, CommandContext context, CancellationToken cancellationToken)
     {
-        output.WriteLine("MAINFRAME / system status");
-        output.WriteLine("CLI         available");
-        output.WriteLine("Kernel      not implemented");
-        output.WriteLine("Storage     not implemented");
-        output.WriteLine("Windows VFS not implemented");
-        return 0;
+        var description = await connection.Client.CallAsync("kernel.describe", null, cancellationToken);
+        var health = await connection.Client.CallAsync("kernel.health", null, cancellationToken);
+        if (context.Json)
+        {
+            context.WriteJson(new { endpoint = connection.Endpoint.Display, description, health });
+            return;
+        }
+
+        context.Output.WriteLine("MAINFRAME / kernel status");
+        context.Output.WriteLine($"Mainframe   {description.GetProperty("name").GetString()}");
+        context.Output.WriteLine($"Identity    {description.GetProperty("mainframeId").GetString()}");
+        context.Output.WriteLine($"Kernel      {description.GetProperty("kernelId").GetString()}");
+        context.Output.WriteLine($"Status      {health.GetProperty("status").GetString()}");
+        context.Output.WriteLine($"Endpoint    {connection.Endpoint.Display}");
+        context.Output.WriteLine($"Version     {description.GetProperty("version").GetString()}");
     }
 }

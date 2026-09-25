@@ -1,9 +1,32 @@
 # Mainframe v1 wire protocol design
 
-Status: approved v1 design target, not an implemented or validated protocol. This
+Status: approved v1 design target with an initial unary subset implemented. This
 document expands the resolved decisions in [plan.md](plan.md). The frame format
 and message assignments below are selected for v1. JSON examples illustrate the
-contracts; publish complete JSON schemas and wire fixtures during implementation.
+contracts; the implemented subset's schema and wire fixture are in `docs/protocol`.
+
+## Implemented Windows-local subset
+
+The first milestone implements the frame codec, strict JSON controls, TLS 1.3 mTLS,
+HELLO/WELCOME, unary REQUEST/RESPONSE, PING/PONG, and GOAWAY. It negotiates only the
+`unary-rpc` feature and `terminal` role; WELCOME reports `authenticated`. The server
+listens on IPv4 loopback only. Local initialization provisions the initial operator;
+network AUTH enrollment and program bootstrap are not implemented yet.
+
+Implemented syscalls are `kernel.describe`, `kernel.health`, and
+`kernel.capabilities`, all version 1 with an empty arguments object. The client
+serializes calls with 10-second deadlines and never retries. Server unary handlers
+run serially, accept optional request timeouts of 1..30,000 ms, and emit only final
+responses. The server rechecks operator authorization on every frame and idle tick.
+
+The host limits connections to 32, TLS handshakes to 8, and unary exchanges to
+4,096 per connection. Request IDs must be increasing odd integers; a high-water
+mark rejects reuse. Late CANCEL for a completed unary exchange is harmless. Stream
+frames are rejected; stream windows and terminal-exchange stream records below are
+future work, not claims of implemented behavior. Negotiated frames must be between
+1 KiB and 1 MiB. No process, storage, peer delegation, or public network acceptance
+is advertised. Shutdown of this subset closes connections; a full streaming drain
+will accompany streaming support. Linux execution remains unverified.
 
 ## Transport and encryption
 

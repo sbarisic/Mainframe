@@ -1,7 +1,7 @@
 # Mainframe plan
 
-Status: approved v1 design, not a claim of implementation. The runtime remains
-unimplemented; the current code is the CLI foundation described below.
+Status: approved v1 design, with the initial Windows-local kernel milestone
+implemented. The complete v1 runtime remains a target; see current scope below.
 
 ## Vision
 
@@ -20,12 +20,23 @@ connections. A single-node installation uses the same contracts and routing mode
 ## Current implementation
 
 - .NET 10 CLI project with command registration and help routing.
-- `mf help`, `mf status`, and `mf version`, including help/version aliases.
+- `mf help`, `mf version`, local `mf cluster init`, and live `status`, `health`, and
+  `capabilities` queries, including structured JSON output and endpoint/state options.
 - Structured exit codes and separate stdout/stderr output.
 - Local .NET tool packaging, MIT license metadata, and Git ignore rules.
+- `mfd serve`: loopback-only TCP/TLS 1.3 host with local operator mTLS.
+- Private local CA/leaf certificates, stable identity, SQLite WAL/FULL metadata,
+  schema checks, revocation checks, and a consistent metadata backup API.
+- Strict bounded framing/JSON, unary RPC, deadlines, heartbeat, and explicit
+  `kernel.describe`, `kernel.health`, and `kernel.capabilities` handlers.
 
-The kernel, peer protocol, storage, jobs, and Windows filesystem adapter are not
-implemented. Commands and contracts below describe the v1 target, not available APIs.
+This milestone runs as the current Windows account with private state. Dedicated
+service-account installation, network invitations/certificate renewal, delegated
+resource grants, peers, process execution/PTYs, storage, jobs, and Windows mounts
+are not implemented. Initial certificates last seven days; expiry fails explicitly.
+The host accepts local terminal clients only and rejects future stream/peer roles.
+Full v1 commands and contracts below remain targets, not available APIs. Linux
+verification is deferred to the user's second machine.
 Support Windows/Linux and public endpoints, trusted users/programs, one persistent
 coordinator, full terminal sessions, both storage providers, and registered local
 programs. No automatic failover, executable deployment, hostile-code sandbox,
@@ -161,7 +172,7 @@ the same semantics as a persistent file.
 
 See [packets.md](packets.md) for the selected 20-byte frame header, message types,
 TLS handshake, RPC lifecycle, process/file streams, flow control, and peer relay.
-It specifies the v1 target; the wire protocol is not yet implemented or validated.
+It specifies the v1 target and identifies the implemented unary subset separately.
 
 Use explicit addresses on private or public networks and persistent authenticated
 TCP/TLS 1.3 connections, including loopback. Implement custom framed RPC using
@@ -509,12 +520,15 @@ content. Select the adapter based on the required filesystem semantics.
 Introduce typed clients for identity/capabilities, shell sessions, process execution,
 file handles/streams, program registration, and enrollment. Keep syscall contracts
 independent of presentation and storage implementation. Only the CLI foundation is
-currently implemented; all following runtime stages require implementation/testing.
+implemented along with the Windows-local unary kernel subset; later stages remain
+pending and require their own implementation/testing.
 
 1. **CLI foundation (implemented).** Keep commands modular; extend the argument
    contract as real operations are introduced.
-2. **Protocol, identity, and coordinator.** Implement framing, TLS 1.3, enrollment,
-   authorization, SQLite metadata, and unary kernel calls. Status reports live state.
+2. **Protocol, identity, and coordinator (local subset implemented).** Framing,
+   TLS 1.3, local bootstrap/operator authorization, SQLite identity metadata, and
+   unary queries exist. Network enrollment/renewal, delegated grants, public
+   hardening, and complete coordinator metadata remain pending.
 3. **Program SDK and terminal execution.** Implement scoped bootstrap, pipe-mode
    execution, Windows ConPTY/Linux PTYs, cancellation, and terminal restoration.
 4. **Two linked kernels.** Establish authenticated peers, exchange manifests, and

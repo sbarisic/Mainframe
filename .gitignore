@@ -11,3 +11,8 @@ artifacts/
 *.trx
 *.coverage
 *.coveragexml
+
+# Local kernel state and private certificates
+/.mainframe/
+/state/
+*.pfx
