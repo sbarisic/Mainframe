@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Mainframe.Cli/Mainframe.Cli.csproj" />
+  </Folder>
+</Solution>
