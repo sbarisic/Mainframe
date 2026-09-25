@@ -1,5 +1,8 @@
 # Mainframe plan
 
+Status: approved v1 design, not a claim of implementation. The runtime remains
+unimplemented; the current code is the CLI foundation described below.
+
 ## Vision
 
 Build a modular, mainframe-style computer environment in .NET 10 under the MIT
@@ -22,7 +25,11 @@ connections. A single-node installation uses the same contracts and routing mode
 - Local .NET tool packaging, MIT license metadata, and Git ignore rules.
 
 The kernel, peer protocol, storage, jobs, and Windows filesystem adapter are not
-implemented. All commands and contracts below are proposals, not available APIs.
+implemented. Commands and contracts below describe the v1 target, not available APIs.
+Support Windows/Linux and public endpoints, trusted users/programs, one persistent
+coordinator, full terminal sessions, both storage providers, and registered local
+programs. No automatic failover, executable deployment, hostile-code sandbox,
+interactive session reattachment, or Orleans is included in v1.
 
 ## Layers and project boundaries
 
@@ -75,8 +82,9 @@ mf --endpoint server:7443 exec cat /vol/documents/report.txt
 
 `mf connect` opens an interactive remote shell. The mainframe shell owns the
 logical working directory, environment, and command registry. One-shot execution
-forwards arguments, streams, and the program's exit code. Endpoint persistence and
-exact command syntax remain to be specified.
+forwards arguments, streams, and the program's exit code. The shell supports quoted
+arguments, logical working-directory changes, and registered commands. Pipelines,
+redirection, expansion, and implicit host-shell evaluation are outside v1.
 
 Programs are ordinary OS processes written in .NET or another language. A program
 manifest declares its command name, launch information, OS/architecture/runtime
@@ -94,15 +102,20 @@ Keep two independent communication paths:
 The same transport and framing can support terminal, program RPC, peer, and
 filesystem client sessions, with different permissions and message contracts.
 Scripted execution preserves separate stdout/stderr streams and exact bytes.
-Arbitrary interactive native applications may require host-side pseudoterminals;
-start with a simple shell and stream-based programs, and define interactive echo,
-control-key handling, and terminal behavior explicitly.
+Implement Windows ConPTY and Linux PTYs through platform-specific launch adapters.
+Interactive sessions use one terminal output stream. Forward dimensions, resize,
+EOF, interrupts, and cancellation; restore client terminal settings on every exit.
+Use Windows Job Objects and Linux process groups for supervised cleanup. Escaping
+those groups is outside the trusted-program guarantee.
 
 The host supplies the kernel endpoint, logical working directory, mainframe and
 execution identities, arguments, and scoped short-lived authentication context.
-Pass non-secret configuration through environment variables; use a protected
-bootstrap mechanism for credentials rather than command-line arguments. Programs
-normally call their local kernel, which routes remote resource requests.
+Pass non-secret configuration through environment variables. Deliver a single-use
+execution bootstrap credential through an explicitly inherited anonymous pipe/file
+descriptor separate from stdin. Environment variables carry the endpoint and handle
+identifier, not credentials. The credential expires after 30 seconds and creates a
+process-scoped RPC session; renewal requires a live authorized execution. Programs
+normally call their local kernel over their own TCP/TLS connection.
 
 Define language-neutral, versioned contracts using portable types rather than
 .NET object serialization. A .NET SDK can expose ordinary async methods and
@@ -113,10 +126,12 @@ SDK for its namespace, or an OS-mounted mainframe filesystem once available.
 Kernel RPC permissions do not sandbox an OS process: start with trusted programs
 and add execution isolation separately.
 
-Initially, cancel ordinary foreground commands when their terminal session is
-lost; explicitly submitted background jobs survive terminal disconnection.
-Cancellation is best effort during network failures, not proof that a remote
-process stopped. Persistent, reconnectable interactive sessions can come later.
+On detected foreground-session loss, initiate cleanup immediately with no reconnect
+grace period. Allow at most two seconds for graceful termination, then force
+termination and revoke execution credentials. Silent failures take up to the
+connection timeout to detect. Cancellation across a partition is best effort, not
+proof that a remote process stopped. Explicit background jobs survive terminal
+disconnection; reconnectable interactive sessions are outside v1.
 
 ## Kernel capabilities and modules
 
@@ -133,8 +148,10 @@ Modules register optional syscall families, such as `fs.*`, `jobs.*`,
 Each capability describes its contract version, input/output types, supported
 features, required permissions, and resource scope. Supporting `fs.read` does not
 mean a kernel holds every volume. Capability advertisements never grant access.
-Centralize namespace routing and permission enforcement in the core. Start with
-trusted modules; consider separate worker processes for crash isolation later.
+Centralize namespace routing and permission enforcement in the core. Load trusted
+.NET modules from administrator-configured paths at startup, with explicit method
+contracts and handlers. Module changes require a host restart; no hot unloading.
+Separate worker processes for module isolation can be considered later.
 
 Storage providers declare features such as random access, writes, atomic rename,
 snapshots, and change notifications. Do not pretend that a sensor stream supports
@@ -142,19 +159,22 @@ the same semantics as a persistent file.
 
 ## Peer connections and syscall protocol
 
-Start with explicit peer addresses over a LAN or VPN and direct connections.
-Use persistent authenticated TCP/TLS connections on Linux and Windows. Choose the
-RPC framework and serialization format before implementation. Explicit framing
-must delimit messages because TCP supplies a byte stream. A length-prefixed JSON
-envelope with binary data frames is one candidate, not a final protocol decision.
-Exchange identity, compatible protocol versions, and capability manifests during
-the handshake. Define manifest updates and invalidation when modules change or
-peers disconnect.
+See [packets.md](packets.md) for the selected 20-byte frame header, message types,
+TLS handshake, RPC lifecycle, process/file streams, flow control, and peer relay.
+It specifies the v1 target; the wire protocol is not yet implemented or validated.
 
-Joining requires an invitation or administrator approval and establishes a node
-identity. Discovery alone does not authorize membership. Authenticate callers,
-authorize each operation, and preserve caller identity across forwarding without
-trusting an arbitrary identity field supplied by a client.
+Use explicit addresses on private or public networks and persistent authenticated
+TCP/TLS 1.3 connections, including loopback. Implement custom framed RPC using
+`SslStream`, `System.Text.Json` control messages, and raw DATA frames. No gRPC,
+named-pipe network transport, NAT traversal, or automatic public relay is included.
+QUIC is deferred; keep application contracts independent of transport details.
+Exchange identity, compatible versions, and capability manifests during connection
+setup; invalidate unavailable providers when peers disconnect.
+
+Joining requires a single-use administrator-issued invitation; possession is
+sufficient approval. Discovery alone does not authorize membership. Authenticate
+callers and authorize each operation. Preserve validated delegation across peer
+forwarding; never trust a client-supplied identity field as authority.
 
 Requests carry a request ID, syscall name/version, target resource, authenticated
 caller context, deadline, and typed arguments. Responses carry the request ID and
@@ -165,6 +185,69 @@ Distinguish unsupported contracts, denied access, unavailable resources, expired
 deadlines, and unknown operation outcomes. A lost response does not prove the
 operation did not execute. Retry only operations with suitable idempotency or
 deduplication rules. Bound forwarding to prevent routing loops.
+
+### Versioning and limits
+
+Publish JSON schemas and wire fixtures alongside the implementation. Encode file
+sizes and offsets as decimal strings; bounded values such as terminal dimensions
+use JSON numbers. Do not use reflection-based object serialization or arbitrary
+type activation. Negotiate the highest mutually supported protocol major and
+optional features explicitly. Breaking method changes require a new method version.
+Within a major, accept additive optional fields and ignore unknown JSON fields,
+but reject duplicate properties, missing required fields, unsupported required
+features, and unknown frame types.
+
+| Setting | Default |
+| --- | ---: |
+| Frame payload | 1 MiB maximum |
+| DATA chunk | 64 KiB |
+| JSON nesting | 32 levels |
+| Concurrent exchanges per connection | 128 |
+| Channels per exchange | 8 |
+| Outstanding credit per channel | 256 KiB maximum |
+| Aggregate inbound/outbound buffering per connection | 16 MiB |
+| TLS/application handshake deadline | 10 seconds per stage |
+| Idle heartbeat interval | 10 seconds |
+| Unresponsive connection timeout | 30 seconds |
+| Graceful shutdown drain | 10 seconds |
+
+Grant stream credit only when capacity exists. Schedule DATA fairly and prioritize
+control traffic. Preserve bounded terminal-exchange records to drain already-
+authorized late DATA without delivery, reject credit overruns, and never reuse
+exchange IDs. Close a connection rather than exceed bookkeeping limits.
+
+## Enrollment, identities, and permissions
+
+`cluster init` creates mainframe/coordinator identities and a private cluster CA.
+Store private keys under the dedicated service account with restrictive filesystem
+permissions. Exclude keys, invitations, and authentication material from logs and
+backups intended for public sharing.
+
+Nodes and operator devices generate their own keys and submit certificate requests.
+Administrators issue cryptographically random invitations valid for 15 minutes,
+specifying identity and role, coordinator address, and trusted CA fingerprint.
+Verify that fingerprint before presenting the invitation. Consume invitations
+transactionally; retries using the same public key return the original enrollment
+result rather than another identity. There is no second approval step.
+
+Issue seven-day certificates; renew in the final 24 hours while authorized. Expired
+or revoked identities require reenrollment. Use mutual TLS for enrolled nodes and
+operator devices. Connections without a client certificate are limited to
+enrollment or the explicit process-bootstrap authentication path; they cannot make
+ordinary operational calls before authentication. Certificate identities do not
+replace current authorization grants. Revocation prevents new leases and triggers
+connected-session termination.
+
+Public endpoints require configurable per-address/global connection and handshake
+limits, authentication throttling, bounded enrollment requests, and security event
+logging. Never fall back to plaintext or accept arbitrary certificates.
+
+Grant named users program execution, volume read/write, device access, and
+administration permissions. Programs receive the intersection of user grants and
+manifest permissions. Use coordinator-signed, audience-bound authorization leases
+lasting 60 seconds. Validate signature, recipient, execution identity, scope, and
+expiry. Forwarding can narrow but never expand permissions. Require synchronized
+clocks with at most five seconds of skew.
 
 ## Routing and the single-machine experience
 
@@ -281,20 +364,72 @@ does not imply replicated storage. Later replication policies must specify which
 copies acknowledge a write, when success means durable storage, and how recovery
 and degraded operation work. Do not silently downgrade durability.
 
-Define filesystem semantics deliberately: concurrent access, file sharing,
-case sensitivity, timestamps, atomic replacement, flush, directory enumeration,
-cache invalidation, and notifications. Editor saves involving temporary files and
-rename must work, not only simple byte writes.
+### Providers and names
+
+Implement both providers in the initial storage milestone:
+
+- Managed volume: one local SQLite database per volume with directories, metadata,
+  and 64 KiB file-content chunks. Target documents and ordinary files first.
+- Host-directory volume: an administrator-selected existing directory exposed
+  through the same filesystem API.
+
+Paths use `/`. Normalize managed names to Unicode NFC, preserve spelling, and
+compare server-side with ordinal case-insensitive comparison. Reject Windows-
+reserved names, control characters, invalid Windows filename characters, trailing
+spaces/dots, and case collisions. Limit names to 255 UTF-16 code units and full
+logical paths to 4,096. SDKs defer name resolution to the server.
+
+The host-directory provider applies the same exposed naming rules. Reject an
+incompatible existing tree at mount validation; later external collisions or
+incompatible names fail explicitly without renaming/deleting host data. Do not
+traverse symbolic links, junctions, or reparse points in v1. Use stable volume IDs
+and opaque owner/session-generation handles; handles do not survive kernel restart.
+
+### Consistency and durability
+
+The authoritative owner serializes operations for its volume. Managed operations
+are transactional; reads see committed data and each bounded write commits
+atomically. Multi-request uploads are not a single transaction. Provide temporary
+files and atomic same-volume rename/replace for complete-file publication. Reject
+cross-volume rename. Delete/rename metadata transactionally and reclaim unreachable
+chunks in bounded maintenance transactions.
+
+Support access modes and explicit read/write/delete sharing flags enforced at the
+owner. Byte-range locks are unsupported and return `NOT_SUPPORTED`. Do not cache
+file contents/metadata between client RPC calls. Enumerate directories in bounded
+batches; concurrent changes can affect subsequent batches.
+
+Managed writes acknowledge after SQLite commit. Host-directory writes acknowledge
+OS acceptance; `fs.flush` explicitly requests durable flushing. Expose these
+provider capabilities. Close is not a substitute for flush. Disconnects may leave
+partial writes; never automatically replay mutations.
+
+Host-directory consistency is limited by direct external modification. Mainframe
+locks coordinate its clients, not arbitrary host applications. Detect changed or
+vanished resources and report errors. Future filesystem adapters must respect
+these provider limits rather than claim stronger semantics.
 
 ## Coordination and failures
 
 Peer discovery and capability exchange do not establish resource ownership or
 resolve conflicting writes. Keep coordination separate from syscall transport.
 
-Initial proposal: one designated coordinator owns shared namespace metadata,
-membership decisions, and scheduling. Any node may also act as a gateway, storage
-provider, or worker. Losing the coordinator stops new authoritative changes and
-new job assignments; specify which existing operations may continue safely.
+One designated coordinator owns shared namespace metadata, membership, grants,
+program registrations, and scheduling. Any node may also act as gateway, storage
+provider, or worker. No automatic promotion or owner reassignment is included.
+
+Use `Microsoft.Data.Sqlite`, WAL, foreign keys, and `synchronous=FULL`. Keep databases
+on local disks, never network shares. The coordinator stores identities,
+revocations, grants, mounts, registrations, durable job records, and schema versions.
+Each node stores execution/recovery state locally; managed volumes use separate
+local databases. Apply numbered transactional migrations, reject unsupported newer
+schemas, and provide consistent backups through SQLite's backup API.
+
+Coordinator outage blocks new sessions, starts, opens, membership changes, and
+grant changes. Existing processes and handles may continue until their current
+authorization leases expire; then deny protected operations and initiate cleanup.
+Recovery restores the designated coordinator and reconciles node state. No Orleans
+dependency: explicit routing, coordination, and process supervision cover v1.
 
 Later, evaluate an established consensus implementation for three voting
 coordinators. A majority can make authoritative changes; a minority must stop
@@ -306,6 +441,25 @@ Do not promise that two machines can always make independent progress during a
 network split while maintaining one consistent writable system.
 
 ## Jobs and services
+
+### Registration and execution
+
+Administrators register already-installed programs; there is no bundle upload,
+download, or deployment in v1. Versioned JSON manifests declare identity, semantic
+version, absolute executable path, fixed arguments, host working directory,
+OS/architecture/runtime requirements, I/O modes, environment allowlist, and requested
+permissions. Keep host working directories distinct from the logical shell directory.
+Support native executables, .NET applications, and scripts through a registered
+interpreter. Never concatenate untrusted arguments into an OS shell command.
+
+Registrations belong to nodes. Incompatible ones remain visible but cannot run.
+Short names resolve only with exactly one eligible registration; otherwise return
+candidates and require `namespace/name@version#node`. Freeze the registration
+revision per execution and retain it in job records. Changes affect future starts.
+
+Run trusted programs under a dedicated non-administrator service account. RPC
+grants are not a hostile-code sandbox. After a host crash, unresolved jobs become
+`interrupted` or `outcome_unknown`; do not retry automatically.
 
 Provide durable job IDs, a job spool, progress, logs, cancellation, and explicit
 retry policies. Explicit background jobs should survive a CLI disconnect;
@@ -350,42 +504,75 @@ the chosen release and any bindings before distribution.
 ProjFS remains an alternative for a directory projection with locally cached
 content. Select the adapter based on the required filesystem semantics.
 
-## Implementation milestones
+## Implementation milestones and interfaces
+
+Introduce typed clients for identity/capabilities, shell sessions, process execution,
+file handles/streams, program registration, and enrollment. Keep syscall contracts
+independent of presentation and storage implementation. Only the CLI foundation is
+currently implemented; all following runtime stages require implementation/testing.
 
 1. **CLI foundation (implemented).** Keep commands modular; extend the argument
    contract as real operations are introduced.
-2. **Local kernel and remote shell.** Add contracts, host, client, and dispatcher
-   over loopback TCP/TLS. Implement identity, health, and capability discovery.
-   Add host-side command execution and a thin terminal client forwarding streams,
-   cancellation, and exit codes. Verify a normal .NET program can call the kernel
-   SDK over its own authenticated connection. Status reports live state.
-3. **Two linked kernels.** Establish authenticated peers, exchange manifests, and
+2. **Protocol, identity, and coordinator.** Implement framing, TLS 1.3, enrollment,
+   authorization, SQLite metadata, and unary kernel calls. Status reports live state.
+3. **Program SDK and terminal execution.** Implement scoped bootstrap, pipe-mode
+   execution, Windows ConPTY/Linux PTYs, cancellation, and terminal restoration.
+4. **Two linked kernels.** Establish authenticated peers, exchange manifests, and
    route a remote read-only syscall. Both CLIs show the same mainframe identity and
    both nodes. Verify incompatible versions, unauthorized peers, disconnection,
    deadlines, and reconnection without stale registry entries. Register programs
    per host and relay a remote process's I/O through either entry kernel.
-4. **Shared namespace and owner-based storage.** Add internal mounts and file
-   operations; read/write a volume through either node. Verify permissions,
+5. **Both storage providers and shared namespace.** Implement managed SQLite and
+   host-directory volumes, internal mounts, handle routing, and durability contracts.
+   Read/write through either node. Verify permissions,
    concurrent access, owner loss, and stale handles. Complete the two-machine
    weather/bank/cat fixture scenario, including `cat` on A reading storage on B.
-5. **Distributed jobs.** Add durable submission, placement, logs, cancellation,
+6. **Distributed jobs.** Add durable submission, placement, logs, cancellation,
    and explicit failure/retry rules. Verify ambiguous outcomes and worker loss.
-6. **Windows export.** Implement the selected adapter against the same client API.
+7. **Windows export (separate adapter milestone).** Implement the selected adapter against the same client API.
    Verify normal editor workflows and that CLI and Windows see the same data.
-7. **Resilience and operator tools.** Add replication, coordinator failover,
-   snapshots, boot profiles, and recovery incrementally with failure tests.
+8. **Later work, outside v1.** Replication, coordinator failover, snapshots, program
+   deployment, hostile-code sandboxing, QUIC, session reattachment, and advanced
+   operator tools require separate plans and failure tests.
 
-## Decisions still open
+## Resolved v1 decisions
 
-- RPC framework, serialization, streaming protocol, and version evolution.
-- Invitation flow, certificate issuance/revocation, and operator authentication.
-- Persistent metadata format and coordinator implementation.
-- File naming, consistency, caching, locking, and durability contracts.
-- Execution isolation and supported job/module formats.
-- Program registration, name conflicts, version selection, and execution manifests.
-- Foreground session lifecycle, pseudoterminal support, and credential bootstrap.
-- Whether a distributed actor framework such as Orleans is useful for services;
-  it is a candidate, not a dependency decision or a substitute for storage semantics.
+| Area | Decision |
+| --- | --- |
+| RPC | Custom 20-byte frames, TCP/TLS 1.3, JSON controls, binary streams |
+| Enrollment | Single-use 15-minute invitations; no second approval |
+| Operator authentication | Enrolled device keys and seven-day certificates |
+| Permissions | Resource grants intersected with program manifest permissions |
+| Coordination | One persistent coordinator; bounded lease-based outage behavior |
+| Metadata | Local SQLite WAL/FULL; transactional migrations and backups |
+| Storage | Both managed chunked SQLite and host-directory providers |
+| Names | NFC, case-preserving/case-insensitive, Windows-friendly names |
+| Execution | Trusted local executables/interpreters; no sandbox claim |
+| Registration | Admin manifests; ambiguous names require version/node qualification |
+| Terminal | ConPTY and Linux PTYs; immediate cleanup on detected session loss |
+| Bootstrap | Single-use 30-second credential through inherited pipe/descriptor |
+| Orleans | Not used in v1 |
+
+## Validation and acceptance
+
+- Protocol: fragmented/coalesced frames, malformed JSON, illegal transitions, ID
+  collisions, slow readers, bounded memory, cancellation races, completion ordering.
+- Identity: invitation expiry/replay, fingerprints, expired/revoked certificates,
+  denied delegation, public-endpoint throttling, and bootstrap expiry/reuse.
+- Coordinator: restart persistence, transactional enrollment, backup/restore,
+  schema rejection, outage blocking, lease expiry, and recovery reconciliation.
+- Storage: cross-node I/O, naming collisions, traversal/link rejection, sharing
+  modes, partial writes, flush, atomic replacement, stale handles, and crash recovery.
+- Execution: exact arguments, ambiguity, qualified names, scoped credentials,
+  exit codes, cancellation, and interrupted-job recovery.
+- Terminals: real Windows ConPTY and Linux PTY tests for interactive input, resize,
+  Ctrl+C, EOF, process-tree cleanup, and client terminal restoration.
+- End-to-end: connect through either node, execute fixture weather on A and bank
+  on B, and cat on A against storage on B. Verify content, grants, streams, routing,
+  and exit status. Use synthetic data, not real banking integration.
+
+Require actual testing on both operating systems before claiming cross-platform
+support. Passing document checks does not establish runtime acceptance.
 
 ## References
 
