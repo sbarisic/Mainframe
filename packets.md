@@ -32,7 +32,9 @@ processing. These are payload budgets; managed object overhead is separate.
 When receive capacity is unavailable, the channel stays at zero credit. Outgoing
 DATA waits for buffer capacity and is scheduled fairly; controls have priority.
 
-A connection retains at most 4,096 exchange records. Completed records retain
+A connection retains at most 4,096 active plus unretired exchange records.
+With `exchange-retire-v1`, completed records are released through the retirement
+handshake below; without it, this is a lifetime bound. Completed records retain
 channel direction, remaining credit, and EOF state rather than response payloads.
 Late authorized DATA is discarded without delivery; excess credit or illegal
 transitions close the connection. Queued input is dropped after completion.
@@ -43,7 +45,7 @@ Negotiated frame sizes range from 1 KiB to 1 MiB.
 Local certificate maintenance requires the stopped-host state lock and uses a
 recoverable journal. It renews only unexpired, unrevoked credentials in their final
 24 hours. This is separate from future network enrollment and renewal.
-Linux execution, storage RPCs, peer leases, and public endpoint acceptance remain
+Linux execution, remote storage, peer leases, and public endpoint acceptance remain
 unimplemented and unverified.
 
 ## Transport and encryption
@@ -149,6 +151,8 @@ nonzero and scoped to their exchange. No total order is promised across channels
 | 0x0011 | RESPONSE | JSON: unary result, stream acceptance, or rejection |
 | 0x0012 | COMPLETE | JSON: final streaming operation result or error |
 | 0x0013 | CANCEL | JSON: best-effort cancellation reason |
+| 0x0014 | RETIRE | Empty; negotiated exchange retirement |
+| 0x0015 | RETIRE_ACK | Empty; negotiated retirement acknowledgement |
 | 0x0020 | DATA | Raw bytes on a declared stream |
 | 0x0021 | END_STREAM | Empty payload: sender will send no more data on the channel |
 | 0x0022 | WINDOW_UPDATE | JSON: additional byte credit from the receiver |
@@ -157,7 +161,7 @@ nonzero and scoped to their exchange. No total order is promised across channels
 | 0x0032 | GOAWAY | JSON: shutdown reason and optional drain deadline |
 
 HELLO, WELCOME, AUTH, AUTH_RESULT, PING, PONG, and GOAWAY use exchange/channel
-zero. REQUEST, RESPONSE, COMPLETE, and CANCEL use a nonzero exchange and channel
+zero. REQUEST, RESPONSE, COMPLETE, CANCEL, RETIRE, and RETIRE_ACK use a nonzero exchange and channel
 zero. DATA, END_STREAM, and WINDOW_UPDATE use both a nonzero exchange and channel.
 
 JSON examples below show payloads only. Exchange and channel IDs are in the
@@ -256,7 +260,7 @@ Foreground cleanup starts at detected loss; silent loss is not detected instantl
 
 ## Requests and results
 
-Planned storage REQUEST for `fs.open` (not currently implemented):
+Storage REQUEST for `fs.open`:
 
 ```json
 {
@@ -401,14 +405,12 @@ interpreters, I/O modes, and requested permissions. Never turn argv into an impl
 host-shell command. Shell v1 supports quoted arguments and working-directory changes,
 not pipelines, redirection, expansion, or implicit host-shell evaluation.
 
-## Local encrypted-storage protocol (planned)
+## Local encrypted-storage protocol
 
-The next milestone is [local encrypted volumes](plan.md#next-milestone-local-encrypted-volumes).
-This section defines planned method-version-1 contracts, not currently accepted
-messages. Retain the 20-byte frame header, TLS, existing channel state machine,
+Local Windows [encrypted volumes](plan.md#local-encrypted-volumes)
+now implement these method-version-1 contracts. See `docs/protocol/storage-v1.schema.json` and the write transcript. Retain the 20-byte frame header, TLS, existing channel state machine,
 limits, cancellation, and completed-exchange bookkeeping. Negotiate the explicit
-`storage-v1` feature before dispatching storage calls. Do not advertise it until
-all corresponding contracts and tests exist. A missing feature is an explicit
+`storage-v1` feature before dispatching storage calls. The current host advertises it alongside `streaming-v1`. A missing feature is an explicit
 unsupported response, not fallback to host filesystem access.
 
 | Methods | Contract outline |
@@ -418,7 +420,7 @@ unsupported response, not fallback to host filesystem access.
 | `volume.list` | Bounded configured mount records, state, UUID, and provider capabilities; never key material |
 | `volume.unmount` | Mount path; refuses busy volumes; flushes/checkpoints/closes before success |
 | `fs.list` | Virtual path, requested batch size, opaque bounded continuation token; returns entries and next token |
-| `fs.stat` | Virtual path; returns type, length, and timestamps |
+| `fs.stat` | Exactly one virtual path or opaque handle; returns type, length, and timestamps |
 | `fs.mkdir`, `fs.delete` | Virtual path; empty-only directory deletion, no recursive delete |
 | `fs.rename` | Source, destination, explicit replace flag; atomic same-volume publication |
 | `fs.open` | Virtual path, access, create mode, read/write/delete sharing flags; returns opaque handle and metadata |
@@ -435,8 +437,9 @@ Batch sizes and ordinary bounded counts remain JSON numbers. Open modes are
 Mutation responses report committed status where applicable; storage COMPLETE
 results have storage-specific contracts, not process exit codes.
 
-Create/mount requests contain a sensitive `password` field, at most 1,024 UTF-8
-bytes. They are operator-only over authenticated TLS. Disable payload logging and
+Create/mount requests contain a sensitive `password` string with no password-specific
+length or character restrictions. Empty strings are valid; the ordinary frame-size
+limit still applies. They are operator-only over authenticated TLS. Disable payload logging and
 redact before JSON/error diagnostics; never echo the field, include it in audit
 records, or deliver it to a program session. Prompt input remains separate from
 foreground program I/O. Password-bearing requests have no replay/idempotent retry.
@@ -457,10 +460,13 @@ Name resolution, local resource limits, mount lifecycle, journal handling, and
 provider capabilities are specified in plan.md. Storage errors must distinguish
 locked/unavailable/busy volumes, access/sharing denials, invalid/stale handles,
 invalid names, missing/existing files, disk full, corruption, unsupported formats,
-and I/O failures. Versioned schemas will assign exact error codes before coding
-handlers. Retry advice never authorizes automatic mutation replay.
+and I/O failures. The schema and explicit handlers define version-1 fields; errors include
+`VOLUME_LOCKED`, `VOLUME_UNAVAILABLE`, `VOLUME_BUSY`, `ACCESS_DENIED`,
+`SHARING_VIOLATION`, `INVALID_HANDLE`, `INVALID_PATH`, `NOT_FOUND`,
+`ALREADY_EXISTS`, `DISK_FULL`, `UNLOCK_FAILED`, `CORRUPT_VOLUME`,
+`UNSUPPORTED_FORMAT`, `NOT_SUPPORTED`, `CANCELLED`, and `IO_ERROR`. Retry advice never authorizes automatic mutation replay.
 
-## File streaming (planned)
+## File streaming
 
 Use raw DATA rather than JSON/base64 for file bytes. Example request:
 
@@ -491,15 +497,15 @@ responder as sender; write declares channel 1 with the requester as sender. A
 zero-length operation may complete as a unary response. For a nonempty write,
 reserve bounded capacity, then grant credit. Require exactly the declared number
 of bytes followed by END_STREAM before beginning the transaction. Short/overlong
-input fails without a partial transaction. COMPLETE reports `bytesWritten` only
-after commit. Reads report `bytesRead` and `eof` after DATA and END_STREAM. EOF
+input fails without a partial transaction. COMPLETE reports decimal-string `bytes` only
+after commit. Reads report decimal-string `bytes` and `eof` after DATA and END_STREAM. EOF
 means the requested range reached the committed file end, including zero-byte reads.
 Flush and metadata operations are unary. A lost COMPLETE can leave a committed
 write with an unknown outcome; cancellation cannot undo an acknowledged commit.
 
 Each bounded managed write is atomic; a multi-request upload is not. Use a temporary
 file and atomic same-volume rename/replace to publish a complete file. Cross-volume
-rename and byte-range locks return explicit unsupported errors. Support owner-
+rename returns an explicit unsupported error; version-2 handles support byte-range locks. Support owner-
 enforced read/write/delete sharing flags. Do not cache content/metadata across
 RPC calls or automatically replay mutations. Directory listings use bounded batches
 and can reflect concurrent changes between batches. Full naming/provider rules are
@@ -531,7 +537,8 @@ confused with protocol violations:
   completion. Discard late DATA only against previously granted credit; decrement
   that credit and never grant more. A credit overrun is a protocol error.
 - Validate and drain already-in-flight stream control frames without reviving
-  channels. Late CANCEL is idempotent; it cannot alter a completed result.
+  channels. Late CANCEL before retirement is idempotent; it cannot alter a completed result.
+  After retirement, every frame for the exchange is a protocol error.
 - Bound terminal-exchange bookkeeping. If preserving records would exceed the
   configured bound, send GOAWAY and close rather than forget state and risk treating
   late frames as new work. The implementation must publish and test this bound.
@@ -588,3 +595,62 @@ mutation retry, QUIC mapping, or reconnectable session is part of v1.
 - [QUIC transport specification](https://www.rfc-editor.org/rfc/rfc9000.html)
 - [QUIC security specification](https://www.rfc-editor.org/info/rfc9001/)
 - [.NET QUIC support](https://learn.microsoft.com/en-us/dotnet/fundamentals/networking/quic/quic-overview)
+
+
+Local storage uses a 64-operation admission limit and serialized owner gate per
+volume. Each connection reserves up to four 256 KiB storage scratch
+budgets, including transfer buffers and provider chunk scratch, within the existing
+16 MiB transport budget. Streaming transactions never wait for incoming DATA.
+Storage RPC deadlines default to ten seconds and accept 1..30,000 ms. Timing out
+or losing COMPLETE can leave a mutation outcome unknown; it is never replayed.
+Metadata and positive authorization failures before mutation use `not_started`;
+I/O/transport failures use `unknown` where commit cannot be excluded.
+
+
+## Negotiated namespace, storage v2, and exchange retirement
+
+Clients can offer `namespace-v1`, `storage-v2`, and `exchange-retire-v1` in HELLO.
+The frame header and protocol major remain 1. Storage method version 2 requires
+both namespace and storage-v2 negotiation; version-1 methods remain available.
+The authenticated `filesystem` role uses operator mTLS and accepts only `fs.*` and
+kernel discovery. It denies `volume.*`, execution, registration, and enrollment.
+Every protected operation checks current resource grants; role or method access
+alone is not permission to access all mounted volumes.
+
+| Frame | Type | Exchange | Channel | Payload |
+| --- | --- | --- | --- | --- |
+| RETIRE | `0x0014` | Nonzero | 0 | Empty |
+| RETIRE_ACK | `0x0015` | Nonzero | 0 | Empty |
+
+After a terminal RESPONSE or COMPLETE, the requester stops producing exchange
+traffic and waits for its already queued writes to finish before sending RETIRE.
+The responder validates/drains previously authorized input until RETIRE, fences
+its outbound exchange writes, and sends RETIRE_ACK. It then drops the completed
+record. The requester drops its record when RETIRE_ACK arrives. Retired exchange
+IDs are never reused; any further received frame for that ID is a protocol error.
+Duplicate, wrong-direction, premature, or unnegotiated retirement is an error.
+
+The writer's fence includes in-flight and queued controls and DATA. A racing local
+producer cannot enqueue frames after the terminal boundary. Already-buffered
+output remains readable after retirement and stays charged to the receive budget
+until consumed or the connection closes. Retirement does not grant extra credit.
+An uncooperative peer is bounded by the existing 128 active exchanges, 4,096
+active/unretired records, and 16 MiB payload budget. Legacy peers keep the old
+completed-record behavior. Exhaustion closes the connection; it never triggers
+mutation replay.
+
+See [storage-v2.schema.json](docs/protocol/storage-v2.schema.json) and the
+[append/retirement transcript](docs/protocol/storage-write-v2-retire.hex). Detailed
+method contracts and portable error mapping guidance are in
+[the protocol reference](docs/protocol/README.md#writable-filesystem-method-version-2).
+Version-2 file IDs are volume UUID plus stable entry ID; synthetic nodes use a
+separate namespace identity. Handles, opaque continuation tokens, and locks remain
+bound to connection and generation. Logical offsets, lengths, byte counts, and
+space values are decimal strings. Attribute masks and batch limits are bounded
+JSON numbers. Unsupported features are explicitly advertised by `fs.discover`.
+
+Retirement acceptance covers 10,050 exchanges with bounded retained records,
+cancellation racing completion, buffered output after retirement, rejection of
+frames after retirement, and legacy bookkeeping exhaustion. A separate TLS storage
+test reads a 257 MiB sparse file after 10,050 root queries on one connection. The
+append/retirement golden transcript is checked against the actual frame encoder.

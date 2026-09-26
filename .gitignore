@@ -16,3 +16,11 @@ artifacts/
 /.mainframe/
 /state/
 *.pfx
+
+# Local encrypted volumes and crash-recovery artifacts
+*.mfv
+*.mfv-wal
+*.mfv-shm
+*.mfv-journal
+*.mfv.lock
+.mfv-create-*/

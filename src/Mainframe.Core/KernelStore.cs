@@ -8,10 +8,12 @@ namespace Mainframe.Core;
 /// <summary>Persistent identity for the first, local-only kernel. Network enrollment is a later milestone.</summary>
 public sealed partial class KernelStore : IDisposable
 {
-    public const int SchemaVersion = 2;
+    public const int SchemaVersion = 3;
     public const string InitialOperatorIdentity = "local-admin";
     private readonly string directory;
     private bool disposed;
+    private readonly object authorizationGate = new();
+    private SqliteConnection? authorizationDatabase;
     private KernelStore(string directory, KernelIdentity identity)
     {
         this.directory = directory;
@@ -28,10 +30,16 @@ public sealed partial class KernelStore : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         if (name.Length > 128 || name.Any(char.IsControl))
+        {
             throw new ArgumentException("The mainframe name must be at most 128 characters and contain no control characters.", nameof(name));
+        }
+
         directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
         if (Directory.Exists(directory) || File.Exists(directory))
+        {
             throw new IOException("The state directory already exists. Initialization never overwrites existing data.");
+        }
+
         var parent = Path.GetDirectoryName(directory) ?? throw new IOException("The state directory cannot be a filesystem root.");
         PrivateStateDirectory.RejectLinks(parent);
         Directory.CreateDirectory(parent);
@@ -116,13 +124,19 @@ public sealed partial class KernelStore : IDisposable
         }
 
         )
+        {
             PrivateStateDirectory.ValidateFile(directory, name);
+        }
+
         using SqliteConnection database = Connect(directory);
         using SqliteCommand command = database.CreateCommand();
         command.CommandText = "SELECT mainframe_id, kernel_id, name, created_at FROM kernel_identity WHERE singleton = 1;";
         using SqliteDataReader reader = command.ExecuteReader();
         if (!reader.Read())
+        {
             throw new InvalidDataException("Kernel metadata has no identity.");
+        }
+
         return new KernelStore(directory, new KernelIdentity(reader.GetString(0), reader.GetString(1), reader.GetString(2), DateTimeOffset.Parse(reader.GetString(3), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)));
     }
 
@@ -135,12 +149,31 @@ public sealed partial class KernelStore : IDisposable
     }
 
     public bool IsOperatorAuthorized(X509Certificate2 certificate) => GetOperatorIdentity(certificate) is not null;
+    /// <summary>Validate TLS trust once, then check expiry and persisted revocation on every operation.</summary>
+    public Func<bool> CreateOperatorSessionValidator(X509Certificate2 certificate)
+    {
+        string principal = GetOperatorIdentity(certificate) ?? throw new System.Security.Authentication.AuthenticationException("Operator is not authorized.");
+        using X509Certificate2 ca = LoadCaCertificate();
+        DateTime notBefore = certificate.NotBefore.ToUniversalTime() > ca.NotBefore.ToUniversalTime() ? certificate.NotBefore.ToUniversalTime() : ca.NotBefore.ToUniversalTime();
+        DateTime notAfter = certificate.NotAfter.ToUniversalTime() < ca.NotAfter.ToUniversalTime() ? certificate.NotAfter.ToUniversalTime() : ca.NotAfter.ToUniversalTime();
+        string fingerprint = CertificateTrust.Fingerprint(certificate), serial = certificate.SerialNumber;
+        return () =>
+        {
+            DateTime now = DateTime.UtcNow;
+            if (disposed || now < notBefore || now > notAfter) return false;
+            return AuthorizationCount("SELECT count(*) FROM operator_identities WHERE thumbprint=$thumbprint AND certificate_serial=$serial AND principal_id=$principal AND disabled=0", ("$thumbprint", fingerprint), ("$serial", serial), ("$principal", principal)) == 1;
+        };
+    }
+
     public string? GetOperatorIdentity(X509Certificate2 certificate)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         using X509Certificate2 ca = LoadCaCertificate();
         if (!CertificateTrust.Validate(certificate, ca, CertificateTrust.ClientAuthentication))
+        {
             return null;
+        }
+
         using SqliteConnection database = Connect(directory);
         using SqliteCommand command = database.CreateCommand();
         command.CommandText = "SELECT principal_id FROM operator_identities WHERE thumbprint = $thumbprint AND certificate_serial = $serial AND disabled = 0;";
@@ -158,7 +191,9 @@ public sealed partial class KernelStore : IDisposable
         command.CommandText = "UPDATE operator_identities SET disabled = 1 WHERE thumbprint = $thumbprint;";
         command.Parameters.AddWithValue("$thumbprint", thumbprint.ToUpperInvariant());
         if (command.ExecuteNonQuery() != 1)
+        {
             throw new KeyNotFoundException("The operator certificate is not registered.");
+        }
     }
 
     /// <summary>Creates a consistent private metadata backup. Certificate private keys are not included.</summary>
@@ -175,7 +210,30 @@ public sealed partial class KernelStore : IDisposable
         source.BackupDatabase(target);
     }
 
-    public void Dispose() => disposed = true;
+    private long AuthorizationCount(string sql, params (string Name, string Value)[] parameters)
+    {
+        lock (authorizationGate)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            // Reuse the connection, not authorization decisions. Each statement observes
+            // the current committed WAL state; no transaction spans calls.
+            authorizationDatabase ??= Connect(directory);
+            using SqliteCommand command = authorizationDatabase.CreateCommand();
+            command.CommandText = sql;
+            foreach (var parameter in parameters) command.Parameters.AddWithValue(parameter.Name, parameter.Value);
+            return (long)command.ExecuteScalar()!;
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (authorizationGate)
+        {
+            disposed = true;
+            authorizationDatabase?.Dispose();
+            authorizationDatabase = null;
+        }
+    }
     private X509Certificate2 LoadLeaf(string fileName, string purpose)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
@@ -189,7 +247,10 @@ public sealed partial class KernelStore : IDisposable
         {
             using X509Certificate2 ca = LoadCaCertificate();
             if (!certificate.HasPrivateKey || !CertificateTrust.Validate(certificate, ca, purpose))
+            {
                 throw new InvalidDataException($"The {fileName} certificate is expired, invalid, or missing its private key. Expired identities require reenrollment; local renewal only accepts unexpired certificates in their final 24 hours.");
+            }
+
             return certificate;
         }
         catch
@@ -217,7 +278,9 @@ public sealed partial class KernelStore : IDisposable
             try
             {
                 if (File.Exists(path + suffix))
+                {
                     PrivateStateDirectory.ValidateFile(directory, "kernel.db" + suffix);
+                }
             }
             catch (FileNotFoundException)
             {
@@ -228,17 +291,24 @@ public sealed partial class KernelStore : IDisposable
         try
         {
             database.Open();
+            NativeSqlite.Verify(database);
             // Refuse incompatible schemas before changing journal mode or performing any writes.
             using SqliteCommand version = database.CreateCommand();
             version.CommandText = "PRAGMA user_version;";
             var actualVersion = Convert.ToInt32(version.ExecuteScalar(), CultureInfo.InvariantCulture);
             if (initializing ? actualVersion != 0 : actualVersion is < 1 or > SchemaVersion)
+            {
                 throw new InvalidDataException($"Unsupported kernel metadata schema {actualVersion}; this build requires schema {SchemaVersion}.");
+            }
+
             using SqliteCommand settings = database.CreateCommand();
             settings.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;";
             settings.ExecuteNonQuery();
             if (!initializing && actualVersion < SchemaVersion)
+            {
                 Migrate(database);
+            }
+
             return database;
         }
         catch

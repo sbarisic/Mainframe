@@ -37,6 +37,8 @@ public static class FrameCodec
             case FrameType.Response:
             case FrameType.Complete:
             case FrameType.Cancel:
+            case FrameType.Retire:
+            case FrameType.RetireAck:
                 if (exchangeId == 0 || channelId != 0)
                     throw new ProtocolException("Exchange control requires a nonzero exchange and zero channel ID.");
                 break;
@@ -52,11 +54,11 @@ public static class FrameCodec
 
         if ((type is FrameType.Ping or FrameType.Pong) && length != 8)
             throw new ProtocolException("Heartbeat payloads must contain exactly eight bytes.");
-        if (type == FrameType.EndStream && length != 0)
+        if (type is FrameType.EndStream or FrameType.Retire or FrameType.RetireAck && length != 0)
             throw new ProtocolException("END_STREAM must have an empty payload.");
         if (type == FrameType.Data && length is 0 or > 65536)
             throw new ProtocolException("DATA payload must contain 1..65536 bytes.");
-        if (type is not (FrameType.Ping or FrameType.Pong or FrameType.EndStream or FrameType.Data) && length == 0)
+        if (type is not (FrameType.Ping or FrameType.Pong or FrameType.EndStream or FrameType.Retire or FrameType.RetireAck or FrameType.Data) && length == 0)
             throw new ProtocolException("Control frames require a JSON payload.");
         return new FrameHeader((int)length, type, exchangeId, channelId);
     }

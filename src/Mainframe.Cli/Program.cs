@@ -15,19 +15,7 @@ internal static class Program
         Console.CancelKeyPress += onCancel;
         try
         {
-            var router = new CommandRouter(
-            [
-                new ClusterCommand(),
-                new StatusCommand(),
-                new HealthCommand(),
-                new CapabilitiesCommand(),
-                new ProgramCommand(),
-                new HostRootCommand(),
-                new ExecCommand(),
-                new ConnectCommand(),
-                new VersionCommand()
-            ]);
-
+            var router = new CommandRouter([new ClusterCommand(), new StatusCommand(), new HealthCommand(), new CapabilitiesCommand(), new ProgramCommand(), new VolumeCommand(), new HostRootCommand(), new ExecCommand(), new ConnectCommand(), new VersionCommand()]);
             return await router.RunAsync(args, Console.Out, Console.Error, cancellation.Token);
         }
         finally

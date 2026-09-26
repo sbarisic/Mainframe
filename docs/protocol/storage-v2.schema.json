@@ -1,0 +1,523 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mainframe:protocol:storage-v2",
+  "title": "Mainframe writable filesystem backend v2",
+  "$defs": {
+    "open": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "file",
+            "directory",
+            "either"
+          ]
+        },
+        "disposition": {
+          "enum": [
+            "open",
+            "create",
+            "open-or-create",
+            "overwrite",
+            "overwrite-or-create",
+            "supersede"
+          ]
+        },
+        "rights": {
+          "type": "array",
+          "uniqueItems": true,
+          "minItems": 1,
+          "maxItems": 7,
+          "items": {
+            "enum": [
+              "read-data",
+              "write-data",
+              "append",
+              "list",
+              "read-metadata",
+              "write-metadata",
+              "delete"
+            ]
+          }
+        },
+        "share": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 3,
+          "items": {
+            "enum": [
+              "read",
+              "write",
+              "delete"
+            ]
+          }
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": true
+    },
+    "enumerate": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "restart": {
+          "type": "boolean"
+        },
+        "marker": {
+          "type": "string"
+        },
+        "continuation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "handle"
+      ],
+      "additionalProperties": true
+    },
+    "rename": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string"
+        },
+        "replace": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "handle",
+        "destination"
+      ],
+      "additionalProperties": true
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "attributes": {
+          "type": "integer",
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            32,
+            33,
+            34,
+            35,
+            36,
+            37,
+            38,
+            39,
+            256,
+            257,
+            258,
+            259,
+            260,
+            261,
+            262,
+            263,
+            288,
+            289,
+            290,
+            291,
+            292,
+            293,
+            294,
+            295
+          ]
+        },
+        "created": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "modified": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "accessed": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "changed": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "handle"
+      ],
+      "additionalProperties": true
+    },
+    "size": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "length": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative signed 64-bit decimal; exact maximum validated by the kernel."
+        },
+        "allocation": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "handle",
+        "length"
+      ],
+      "additionalProperties": true
+    },
+    "disposition": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "delete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "handle",
+        "delete"
+      ],
+      "additionalProperties": true
+    },
+    "lock": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative signed 64-bit decimal; exact maximum validated by the kernel."
+        },
+        "length": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative signed 64-bit decimal; exact maximum validated by the kernel."
+        },
+        "exclusive": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "handle",
+        "offset",
+        "length"
+      ],
+      "additionalProperties": true
+    },
+    "write": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative signed 64-bit decimal; exact maximum validated by the kernel."
+        },
+        "length": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative signed 64-bit decimal; exact maximum validated by the kernel."
+        },
+        "append": {
+          "type": "boolean"
+        },
+        "constrained": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "handle",
+        "offset",
+        "length"
+      ],
+      "additionalProperties": true
+    },
+    "handle": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "handle"
+      ],
+      "additionalProperties": true
+    },
+    "path": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": true
+    },
+    "stat": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "handle": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": true,
+      "oneOf": [
+        {
+          "required": [
+            "path"
+          ],
+          "not": {
+            "required": [
+              "handle"
+            ]
+          }
+        },
+        {
+          "required": [
+            "handle"
+          ],
+          "not": {
+            "required": [
+              "path"
+            ]
+          }
+        }
+      ]
+    },
+    "entry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "directory": {
+          "type": "boolean"
+        },
+        "length": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative signed 64-bit decimal; exact maximum validated by the kernel."
+        },
+        "resourceId": {
+          "type": "string"
+        },
+        "allocationLength": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative signed 64-bit decimal; exact maximum validated by the kernel."
+        },
+        "storedBytes": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative signed 64-bit decimal; exact maximum validated by the kernel."
+        },
+        "attributes": {
+          "type": "integer"
+        },
+        "state": {
+          "enum": [
+            "mounted",
+            "locked"
+          ]
+        },
+        "generation": {
+          "type": "string"
+        },
+        "created": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "modified": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "accessed": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "changed": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "directory",
+        "length",
+        "created",
+        "modified"
+      ],
+      "additionalProperties": true
+    },
+    "opened": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "entry": {
+          "$ref": "#/$defs/entry"
+        },
+        "action": {
+          "enum": [
+            "created",
+            "opened",
+            "replaced"
+          ]
+        }
+      },
+      "required": [
+        "handle",
+        "entry",
+        "action"
+      ],
+      "additionalProperties": true
+    },
+    "listing": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/entry"
+          }
+        },
+        "continuation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entries"
+      ],
+      "additionalProperties": true
+    },
+    "space": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "totalBytes": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative signed 64-bit decimal; exact maximum validated by the kernel."
+        },
+        "freeBytes": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative signed 64-bit decimal; exact maximum validated by the kernel."
+        },
+        "scope": {
+          "const": "shared-host-capacity"
+        }
+      },
+      "required": [
+        "identity",
+        "totalBytes",
+        "freeBytes",
+        "scope"
+      ],
+      "additionalProperties": true
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "supported": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unsupported": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maximumTransfer": {
+          "const": 65536
+        },
+        "maximumEnumeration": {
+          "const": 256
+        },
+        "thinAllocation": {
+          "const": true
+        }
+      },
+      "required": [
+        "supported",
+        "unsupported"
+      ],
+      "additionalProperties": true
+    },
+    "discovery": {
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/capabilities"
+        },
+        "entry": {
+          "$ref": "#/$defs/entry"
+        },
+        "backingStorage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/space"
+          }
+        }
+      },
+      "required": [
+        "capabilities",
+        "entry",
+        "backingStorage"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

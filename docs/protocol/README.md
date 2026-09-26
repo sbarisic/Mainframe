@@ -7,8 +7,8 @@ AUTH. AUTH_RESULT is `{"ok":true}` on success; failed authentication closes the
 connection. No unauthenticated operational requests are dispatched.
 
 HELLO requires `unary-rpc`; current clients also offer `streaming-v1`, `execution-v1`,
-and `shell-v1`. WELCOME selects offered features only. Existing unary clients still
-work. Peers, filesystem clients, and enrollment are not implemented.
+`shell-v1`, `storage-v1`, `namespace-v1`, `storage-v2`, and `exchange-retire-v1`. WELCOME selects offered features only. Existing unary clients still
+work. Peers, Windows filesystem adapters, and enrollment are not implemented; local SDK file access is available.
 
 ## Contracts
 
@@ -58,14 +58,16 @@ The client never replays requests. Stream cancellation keeps other exchanges usa
 Frames negotiate 1 KiB..1 MiB, with DATA bounded to 64 KiB and available credit.
 There are at most 128 active exchanges and eight channels each. Reserved input
 windows and queued output DATA each have a 6 MiB budget; controls and pending
-request payloads each have a 1 MiB bound. Current-frame processing uses the remaining
-allowance within the 16 MiB payload budget. Object metadata is separately bounded
+request payloads each have a 1 MiB bound. Current-frame processing and storage
+transfer reservations each use another 1 MiB within the 16 MiB payload budget.
+Object metadata is separately bounded
 by the exchange/channel limits.
 
 Completed records keep channel credit/direction/EOF state, without retaining the
 RPC response. Only previously authorized late DATA can be discarded. The 4,096
-lifetime exchange-record bound closes the connection instead of forgetting IDs.
-Late CANCEL is harmless; over-credit DATA, repeated EOF, wrong-direction traffic,
+active/unretired record bound closes the connection instead of forgetting live state.
+Peers without `exchange-retire-v1` retain the lifetime bound.
+Before retirement, late CANCEL is harmless; over-credit DATA, repeated EOF, wrong-direction traffic,
 or premature COMPLETE is a protocol error. Data is scheduled fairly across
 channels and control frames have priority.
 
@@ -91,32 +93,137 @@ Each `.hex` file contains one full application frame before TLS encryption:
 
 Golden tests compare source-generated contracts against these bytes. They are
 individual frames, not a complete bidirectional transcript. See
-[packets.md](../../packets.md) for the broader v1 design and deferred peer/storage
+[packets.md](../../packets.md) for the broader v1 design and deferred peer/remote-storage
 and enrollment contracts.
 
-## Planned encrypted-storage contracts
+## Encrypted-storage contracts
 
-Storage is the next local Windows milestone, not part of the current schemas or
-wire fixtures. See [plan.md](../../plan.md#next-milestone-local-encrypted-volumes)
-for implementation and acceptance, and
-[packets.md](../../packets.md#local-encrypted-storage-protocol-planned) for contracts.
+Local Windows storage negotiates `storage-v1` plus `streaming-v1`. See
+[storage-v1.schema.json](storage-v1.schema.json),
+[plan.md](../../plan.md#local-encrypted-volumes), and
+[packets.md](../../packets.md#local-encrypted-storage-protocol).
+The JSON schema contains method-specific request definitions and typed results;
+unknown optional properties remain allowed. The parser rejects duplicate properties.
+Numeric bounds that JSON string schemas cannot express are enforced by handlers.
 
-Add `storage-v1` feature negotiation and explicit method-version-1 contracts for
-volume administration, metadata, handles, and binary reads/writes. Keep the existing
-frame format. Storage lengths/offsets/byte counts are decimal strings; one read or
-write request transfers at most 64 KiB. END_STREAM is not a commit acknowledgement;
-write COMPLETE follows the transaction commit. Storage completion results are not
-`ProcessExited`. Existing process fixtures, including exit code 7, remain unchanged.
+`storage-write-v1.hex` contains a complete interleaved application transcript:
+requester REQUEST, responder streaming RESPONSE, responder WINDOW_UPDATE,
+requester DATA (`abc`), requester END_STREAM, and responder COMPLETE after commit.
+The fixture is compared byte-for-byte with explicit source-generated contracts.
+It contains no credentials. TLS records and handshake frames are not included.
+Storage completion uses `bytes` and `eof`, distinct from `ProcessExited`.
+The existing process fixtures, including exit code 7, remain unchanged.
 
-The implementation must add `storage-v1.schema.json` and golden fixtures/transcripts
-for open/read/write/flush/close, mount states, bounded enumeration, and failures.
-Include ordered RESPONSE/DATA/END_STREAM/COMPLETE exchanges, zero-length operations,
-wrong direction, declared-length mismatch, cancellation before/after commit,
-late authorized DATA, failed authentication, and stale handles. Only synthetic
-passwords may appear in fixtures, clearly labeled as test data. Runtime traces and
-errors must redact create/mount passwords before serialization or logging.
+Integration tests exercise zero-length files, bounded transfers, truncated/overlong
+writes, cancellation, independent connections, sharing errors, locked mounts,
+wrong passwords, and actual program SDK access. Provider tests and child-host crash
+injection cover encryption and transaction durability separately from framing.
+Current Windows storage has no remote ownership or WinFsp protocol extension.
 
-Schemas and wire fixtures are intentionally not fabricated in this documentation
-change. Add them with source-generated contracts and executable protocol tests.
-Native encryption, WAL recovery, disk-full, and crash-injection tests also remain
-required; a valid wire transcript does not demonstrate storage durability.
+Password-bearing create/mount requests are operator-only. Typed request `ToString`
+does not expose secrets. Passwords may be empty or contain any Unicode characters;
+there is no password-specific length limit beyond the common RPC frame bound.
+Runtime logs contain generic failure or volume identity events,
+not payloads. Golden fixtures must never contain real passwords or credentials.
+
+
+## Writable filesystem method version 2
+
+All methods below require negotiated `namespace-v1`, `storage-v2`, and the existing
+streaming feature. [storage-v2.schema.json](storage-v2.schema.json) defines payloads.
+Use explicit `version: 2` in REQUEST. Version-1 handles use version-1 methods;
+version-2 handles use version-2 methods. Both enforce the same sharing and locks.
+
+| Method | Arguments definition | Result |
+| --- | --- | --- |
+| `fs.discover` | `path` | `discovery`: metadata, capabilities, deduplicated backing capacity |
+| `fs.open` | `open` | `opened`: handle, metadata, created/opened/replaced action |
+| `fs.stat` | `stat` | `entry`; exactly one path or handle |
+| `fs.enumerate` | `enumerate` | `listing`; sorted batch and optional opaque continuation |
+| `fs.read` | v1 `range` | Existing DATA/END_STREAM/COMPLETE byte-count contract |
+| `fs.write` | `write` | Same transfer contract, with append/constrained options |
+| `fs.rename` | `rename` | `committed` |
+| `fs.metadata` | `metadata` | `committed` |
+| `fs.size` | `size` | `committed`; allocation mode shrinks EOF when necessary |
+| `fs.disposition` | `disposition` | `committed`; durable set/clear deletion intent |
+| `fs.cleanup`, `fs.close`, `fs.flush` | `handle` | `committed` |
+| `fs.lock`, `fs.unlock` | `lock` | `committed`; unlock matches offset, length and mode |
+| `fs.flush-volume` | `path` | `committed`; selects one unlocked volume |
+
+Create, open, open-or-create, overwrite, overwrite-or-create, and supersede are
+owner-serialized transactional dispositions. Overwrite truncates the existing
+object; supersede creates a new identity while version-2 handles retain the old
+object. Directory overwrite/supersede is rejected. Kind is file, directory, or
+either. Default rights are read-data/read-metadata; share flags default to none.
+Data/list/metadata-read rights require volume read. Data-write/append/metadata-write/
+delete rights require volume write. Metadata-only handles do not reserve data
+sharing access. Read/write/delete sharing is enforced at the kernel across clients.
+
+Enumeration accepts limit 1..256, optional restart or initial marker, and a
+continuation bound to handle/generation. Restart and continuation are mutually
+exclusive; marker and continuation are mutually exclusive. Each request executes a
+bounded ordered query, so concurrent changes may affect later batches. Root `/`
+contains only `vol`; `/vol` filters configured volumes by current read grants and
+includes `state: locked`. Locked contents return VOLUME_LOCKED after authorization.
+
+Attributes use the portable Windows-compatible values: read-only 1, hidden 2,
+system 4, archive 32, temporary 256. Other bits are rejected. Timestamp setters use
+ISO 8601 round-trip format. Reads do not update access time. Allocation is logical
+and thin; storedBytes reports surviving chunk payload bytes, not encrypted database
+size. BackingStorage reports shared host capacity, not per-volume quotas.
+
+Delete intent requires delete rights, compatible sharing, a writable entry, and
+an empty directory. It rejects new opens and conflicting namespace mutations.
+Cleanup releases sharing/locks and detaches the name when no uncleaned handles
+remain. I/O through retained version-2 handles may continue until final close.
+Restart/disconnect finalizes accepted deletion intent; this is recovery, not RPC
+replay. Version-1 handles are invalidated when their name/object is removed or
+replaced. Atomic replacement preserves source identity and retains old destination
+objects until their final handles close.
+
+Locks are fail-fast, shared/exclusive, handle-owned, limited to 256 per handle and
+4,096 per host. Reads conflict with another handle's exclusive lock; writes and
+size changes conflict with shared locks (including their own) and another handle's exclusive lock.
+This follows [Windows byte-range access rules](https://learn.microsoft.com/en-us/windows/win32/fileio/locking-and-unlocking-byte-ranges-in-files). Cleanup,
+disconnect, and authorization loss release locks. Append chooses EOF inside the
+transaction; constrained writes cannot extend EOF and report actual committed bytes.
+Every write remains at most 64 KiB and receives exactly its declared DATA plus EOF
+before committing. Completion loss may leave an unknown committed outcome.
+
+The `filesystem` role requires the existing operator certificate and allows only
+filesystem RPCs and kernel queries. It cannot administer volumes, start processes,
+register programs, or enroll identities. Native Windows security descriptors and
+NTSTATUS mapping belong to the future adapter.
+
+| Portable error | Suggested later Windows mapping |
+| --- | --- |
+| `NOT_FOUND` | STATUS_OBJECT_NAME_NOT_FOUND |
+| `PATH_NOT_FOUND` | STATUS_OBJECT_PATH_NOT_FOUND |
+| `ALREADY_EXISTS` | STATUS_OBJECT_NAME_COLLISION |
+| `ACCESS_DENIED` | STATUS_ACCESS_DENIED |
+| `SHARING_VIOLATION` | STATUS_SHARING_VIOLATION |
+| `LOCK_CONFLICT` | STATUS_FILE_LOCK_CONFLICT / STATUS_LOCK_NOT_GRANTED by callback |
+| `LOCK_NOT_HELD` | STATUS_RANGE_NOT_LOCKED |
+| `DELETE_PENDING` | STATUS_DELETE_PENDING |
+| `DIRECTORY_NOT_EMPTY` | STATUS_DIRECTORY_NOT_EMPTY |
+| `NOT_DIRECTORY`, `IS_DIRECTORY` | STATUS_NOT_A_DIRECTORY / STATUS_FILE_IS_A_DIRECTORY |
+| `INVALID_HANDLE` | STATUS_INVALID_HANDLE |
+| `VOLUME_LOCKED` | STATUS_DEVICE_NOT_READY |
+| `NOT_SUPPORTED` | STATUS_NOT_SUPPORTED |
+
+These mappings are guidance for adapter tests, not a claim of Windows filesystem
+compatibility. See [packets.md](../../packets.md#negotiated-namespace-storage-v2-and-exchange-retirement)
+for retirement boundaries and [storage-write-v2-retire.hex](storage-write-v2-retire.hex)
+for a golden append transfer followed by RETIRE/RETIRE_ACK. Both retirement frames
+have empty payload, nonzero exchange ID, and channel zero.
+
+Validation includes schema-1 migration rollback, all open dispositions, retained
+objects, locked namespaces and grant filtering, handle-bound enumeration across
+concurrent changes, per-handle/host lock quotas, filesystem-role denial, permanent
+handle invalidation after observed authorization loss, and real host termination
+around accepted deletion and replacement. The golden write/retirement transcript
+is generated independently and compared byte-for-byte by the protocol tests.
+
+The final Windows Release suite passes **186 tests** on 2026-09-26. Unknown
+optional JSON fields are ignored during both decoding and volume-queue selection;
+only the selected method's declared path or handle controls routing.

@@ -2,8 +2,9 @@
 
 Status: approved v1 design, with the Windows-local kernel, program execution, and
 interactive shell milestones implemented. The complete distributed v1 runtime
-remains a target; see the verified scope below. The next milestone is planned
-Windows-local password-unlocked encrypted volumes; no storage runtime is implemented yet.
+remains a target; see the verified scope below. Windows-local password-unlocked encrypted volumes and SDK file access are implemented;
+see storage validation and limitations below. The virtual root and writable Windows
+VFS backend are implemented; the actual Windows adapter remains a separate milestone.
 
 ## Vision
 
@@ -73,13 +74,13 @@ This remains a local development host running as the current Windows account.
 The initial operator has a persisted wildcard grant; launched programs are trusted
 host processes, not sandboxed code. A dedicated service-account installer,
 multi-user grant administration, network invitations/automatic certificate renewal,
-public endpoint hardening, peers, Linux PTYs, filesystem providers, background jobs,
+public endpoint hardening, peers, Linux PTYs, host-directory/remote providers, background jobs,
 and Windows filesystem export remain pending. No public listener or firewall rule
 is installed. Linux support is not claimed until tested on the second machine.
 
 Local limits: 32 connections, eight TLS handshakes, 64 foreground processes,
 16 shells per connection, 128 programs and host roots, and 4 KiB serialized
-manifests. Wire limits and the 4,096 lifetime exchange-record bound are specified
+manifests. Wire limits and the 4,096 active/unretired exchange-record bound (lifetime for legacy peers) are specified
 in [packets.md](packets.md). Ordinary CLI RPC and launch acceptance deadlines are
 ten seconds; accepted program runtime has no implicit ten-second timeout.
 
@@ -456,7 +457,8 @@ cross-volume rename. Delete/rename metadata transactionally and reclaim unreacha
 chunks in bounded maintenance transactions.
 
 Support access modes and explicit read/write/delete sharing flags enforced at the
-owner. Byte-range locks are unsupported and return `NOT_SUPPORTED`. Do not cache
+owner. Version-2 handles support shared/exclusive byte-range locks; version-1
+clients participate in enforcement but cannot acquire them. Do not cache
 file contents/metadata between client RPC calls. Enumerate directories in bounded
 batches; concurrent changes can affect subsequent batches.
 
@@ -470,11 +472,31 @@ locks coordinate its clients, not arbitrary host applications. Detect changed or
 vanished resources and report errors. Future filesystem adapters must respect
 these provider limits rather than claim stronger semantics.
 
-## Next milestone: local encrypted volumes
+## Local encrypted volumes
 
-Status: planned, not implemented. This supersedes the previous requirement to ship
-both storage providers together. Build and accept the first provider on this Windows
-machine before Linux, peers, host-directory providers, or WinFsp.
+Status: implemented for Windows x64. This supersedes the former requirement to ship both providers together.
+Linux, peers, host-directory providers, and WinFsp remain separate milestones.
+
+The implementation uses source-built SQLCipher 4.19.0 with OpenSSL 3.5.8, pinned
+archives/revisions and MSVC 14.44.35207 in `native/dependencies.json`. Build with
+`native/build.ps1`; source archives, portable build tools, and binaries remain in
+ignored `artifacts/native`. Runtime notices are copied with build/publish output.
+Existing unencrypted coordinator databases use the same qualified engine and
+migrate to schema 3 without changing identities or registrations.
+
+Implemented interfaces include volume administration, all filesystem calls below,
+`MainframeProgram.Files`, seekable SDK streams, and standalone Ls/Cat/StorageDemo
+programs. Storage transfer completions contain `bytes` and `eof`; they are not
+process exit statuses. Four storage operations per connection reserve 256 KiB each
+within the transport budget. Each volume has its own serialized owner gate and
+64-operation admission limit. Independent volumes can run concurrently. Unmount
+refuses while handles or operations remain on that volume.
+
+Chunks invalidated by delete/truncate are reclaimed in batches of at most 128.
+Truncation records an epoch boundary so later extension cannot reveal old bytes.
+Maintenance runs one volume per tick and retains recovery data if it fails.
+Password operations have a separate two-operation admission limit and throttling.
+No build or acceptance step modifies the user's live mounts or registrations.
 
 ### Container and encryption decisions
 
@@ -511,7 +533,7 @@ honor flushes; process-kill tests do not establish power-loss hardware behavior.
 
 ### Passwords and mount lifecycle
 
-Proposed administrator commands (not available yet):
+Administrator commands:
 
 ```powershell
 mframe volume create E:\Mainframe\Data\documents.mfv
@@ -537,13 +559,21 @@ integrity validation time and fail without exposing a half-mounted namespace.
 
 Read passwords from a masked console prompt, never argv, environment variables,
 terminal process streams, config files, logs, or coordinator metadata. Require a
-usable console for create/mount in this milestone. Creation requires at least 12
-Unicode scalar values; passwords are case-sensitive and never normalized or
-trimmed. Bound UTF-8 encoding to 1,024 bytes. Existing-container unlock checks the
-maximum only, so policy changes do not lock out valid credentials. Passwords travel
+usable console for create/mount in this milestone. There is no password-specific
+length or character policy, including for empty passwords. Passwords are
+case-sensitive and never normalized or trimmed. The existing RPC frame-size bound
+still applies to create/mount requests. Passwords travel
 only in sensitive operator RPC payloads over the existing authenticated TLS link;
 programs cannot invoke mount/unlock administration or receive passwords. Redact
 these requests before tracing, exception formatting, or audit logging.
+
+Pass password bytes through SQLCipher's length-aware `sqlite3_key` API, not SQL
+text or a connection-string password. Existing nonempty passwords without NUL
+retain their UTF-8 bytes. Empty or NUL-containing passwords use one NUL byte
+followed by base64 of their UTF-8 bytes. This disjoint encoding supplies nonempty
+key material, preserves embedded NULs, and keeps existing containers compatible.
+SQLCipher still performs its standard password derivation. An empty password
+must never select plaintext mode.
 
 Keep key material only for the unlocked lifetime, minimize password copies, clear
 mutable buffers, and release native keys on close. Managed strings, OS paging, and
@@ -579,7 +609,7 @@ source-generated JSON, client APIs, SDK, and capability discovery together.
 
 The existing naming policy still applies. Resolve NFC names using a registered
 server-side ordinal-ignore-case SQLite collation, not SQLite's ASCII-only NOCASE.
-Enforce uniqueness transactionally. Reject traversal above `/vol`, Windows-reserved
+Enforce uniqueness transactionally. Reject traversal above `/`, Windows-reserved
 names, invalid characters, trailing dots/spaces, and case collisions. Do not store
 symlinks, hard links, alternate data streams, or executable host paths in volumes.
 Programs continue launching from existing host working directories; virtual paths
@@ -619,8 +649,8 @@ in bounded transactions without exposing deleted contents through reused entries
 Managed mutations acknowledge after FULL commit; `fs.flush` confirms prior writes
 and reports underlying errors, without promising a checkpoint or backup-ready file.
 Close does not replace flush. Enumeration is bounded and may observe changes between
-batches; it is not a snapshot. Byte-range locks and cross-volume rename return
-`NOT_SUPPORTED`. Preserve the 16 MiB connection transport budget and reserve read/
+batches; it is not a snapshot. Version-2 handles support byte-range locks;
+cross-volume rename returns `NOT_SUPPORTED`. Preserve the 16 MiB connection transport budget and reserve read/
 write buffers within it rather than introducing an unbounded storage queue.
 
 Initial configurable caps: 32 mounted volumes, 256 handles per connection, 1,024
@@ -674,7 +704,7 @@ Implementation references: [SQLCipher design](https://www.zetetic.net/sqlcipher/
 [SQLCipher licensing](https://www.zetetic.net/sqlcipher/license/), and
 [Microsoft.Data.Sqlite encryption](https://learn.microsoft.com/en-us/dotnet/standard/data/sqlite/encryption).
 The selected native distribution and its dependencies need their own retained
-notices; Mainframe remains MIT. No encryption dependency has been added by this plan.
+notices; Mainframe remains MIT. The source-built encryption dependency is now used; notices are retained under `native`.
 
 ## Coordination and failures
 
@@ -791,25 +821,26 @@ behavior require their own implementation and acceptance tests.
    registered programs, host-root navigation, and the kernel-owned shell are tested.
    Next implement the Linux launch/process-group/PTY adapters and validate on the
    second machine. Keep the same wire, SDK, and manifest contracts.
-4. **Local encrypted storage (next, planned).** Complete the implementation and
-   acceptance sequence in [the encrypted-volume plan](#next-milestone-local-encrypted-volumes).
+4. **Local encrypted storage (Windows implemented).** See implementation and
+   acceptance details in [the encrypted-volume plan](#local-encrypted-volumes).
    Password-unlocked containers, local `/vol` mounts, SDK file access, and crash-safe
    writes come before peers. Host-directory providers and WinFsp are excluded.
-5. **Two linked kernels.** Establish authenticated peers, exchange manifests, and
+5. **Virtual root and writable backend (Windows implementation).** `/`, `/vol`, directory handles, container schema 2, retained objects, metadata/allocation, deletion dispositions, range locks, filesystem-role mTLS, and negotiated exchange retirement. See the acceptance record below.
+6. **Two linked kernels.** Establish authenticated peers, exchange manifests, and
    route a remote read-only syscall. Both CLIs show the same mainframe identity and
    both nodes. Verify incompatible versions, unauthorized peers, disconnection,
    deadlines, and reconnection without stale registry entries. Register programs
    per host and relay a remote process's I/O through either entry kernel.
-6. **Storage expansion and shared namespace.** Add the host-directory provider
+7. **Storage expansion and shared namespace.** Add the host-directory provider
    alongside encrypted managed volumes, remote handle routing, and owner availability.
    Read/write through either node. Verify permissions,
    concurrent access, owner loss, and stale handles. Complete the two-machine
    weather/bank/cat fixture scenario, including `cat` on A reading storage on B.
-7. **Distributed jobs.** Add durable submission, placement, logs, cancellation,
+8. **Distributed jobs.** Add durable submission, placement, logs, cancellation,
    and explicit failure/retry rules. Verify ambiguous outcomes and worker loss.
-8. **Windows export (separate adapter milestone).** Implement the selected adapter against the same client API.
+9. **Windows export (separate adapter milestone).** Implement the selected adapter against the same client API.
    Verify normal editor workflows and that CLI and Windows see the same data.
-9. **Later work, outside v1.** Replication, coordinator failover, snapshots, program
+10. **Later work, outside v1.** Replication, coordinator failover, snapshots, program
    deployment, hostile-code sandboxing, QUIC, session reattachment, and advanced
    operator tools require separate plans and failure tests.
 
@@ -830,6 +861,32 @@ behavior require their own implementation and acceptance tests.
 | Terminal | ConPTY and Linux PTYs; immediate cleanup on detected session loss |
 | Bootstrap | Single-use 30-second credential through inherited pipe/descriptor |
 | Orleans | Not used in v1 |
+
+## Storage implementation validation
+
+Provider, protocol, and real Windows integration tests cover encryption and WAL
+sentinels, wrong passwords, unsupported/corrupt containers, sparse reads, truncation,
+case collisions, rollback, bounded reclamation, simulated disk-full/flush failures,
+sharing, read-only program scopes, cross-session handles and cursor rejection,
+revocation, invalid/short/overlong writes, cancellation, and binary-exact SDK output.
+Real child kernels are terminated before/after write commit and during creation
+publication/checkpoint. Restart requires unlock and recovers committed content.
+A real ConPTY test verifies masked password confirmation and console restoration.
+On 2026-09-26, all 146 tests passed in both Debug and Release on Windows x64,
+with no failures or skipped tests. The suite includes standalone SDK demo/ls/cat
+acceptance, locked restart and unlock, and the existing execution/Hello tests.
+It also verifies rejection by Windows' ordinary SQLite engine, plus independent
+volume progress when another volume's queue is full. Password-policy follow-up
+tests cover empty, short, long, Unicode, and control-character passwords through
+the provider, RPCs, and real console prompts; empty-password containers stay encrypted.
+After removing the password policy, all 156 tests passed in Debug on 2026-09-26.
+
+Process termination and injected I/O failures do not establish physical power-loss
+behavior. Durable acknowledgements rely on OS/device flush guarantees. Native DLL
+builds and runtime acceptance currently cover Windows x64 only; Linux is not claimed.
+Missing or externally discarded WAL files can destroy acknowledged data; recovery
+files must be preserved. File-backed temporary stores and plaintext fallback are
+prohibited. Corruption is reported, not automatically repaired or silently ignored.
 
 ## Validation and acceptance
 
@@ -861,3 +918,91 @@ support. Passing document checks does not establish runtime acceptance.
 - [Microsoft ProjFS provider overview](https://learn.microsoft.com/en-us/windows/win32/projfs/provider-overview)
 - [etcd failure behavior](https://etcd.io/docs/v3.7/op-guide/failures/)
 - [Orleans overview](https://dotnet.github.io/orleans/docs/overview/)
+
+
+## Virtual root and writable backend: September 2026
+
+This milestone prepares the kernel for a writable Windows adapter. It does not
+install WinFsp, export a drive, or make `/vol` a Windows working directory.
+`mframe connect` retains `/host` navigation; SDK filesystem paths remain absolute.
+
+The namespace resolver accepts `/`, `/vol`, and configured mount names. It collapses
+repeated separators and dot components, permits traversal back to `/`, and rejects
+traversal above it. `vol` is case-insensitive and displayed canonically. Root and
+`/vol` have stable namespace identities and Unix-epoch timestamps. Mounted roots
+have the container's stable identity and timestamps. Authorized locked mounts stay
+visible with `state: locked`; contents require manual unlock. Listings filter on
+volume read grants. Ordinary mutations cannot change namespace or mount nodes.
+`/host`, `/sys`, `/proc`, and `/dev` are not filesystem RPC providers.
+
+Container schema 2 migrates schema 1 transactionally, preserving UUID, entry IDs,
+names, bytes, and original timestamps. Access/change times initially equal the old
+modification time; allocation initially equals EOF. Names can be detached while
+version-2 handles retain the underlying object. Deletion intent is durable and can
+be cleared before cleanup. Cleanup releases sharing reservations and range locks;
+final close releases object retention. Restart completes durable deletion intents.
+Maintenance reclaims unreferenced objects and chunks in batches of at most 128.
+The coordinator database, password handling, and SQLCipher settings are unchanged.
+
+Version-2 opens have explicit rights and creation dispositions. Rights map to the
+existing volume read/write grants and cannot expand caller authority. Metadata-only
+opens and directory handles are supported. Enumeration is ordered by ordinal
+case-insensitive name, uses at most 256 rows, and supports restart, an initial name
+marker, and a signed handle/generation-bound continuation. It is not a snapshot.
+
+Metadata includes a volume UUID plus stable entry ID, four timestamps, supported
+attributes, logical allocation, and stored chunk bytes. Read-only files reject data
+mutation and deletion; an authorized metadata update can clear the flag. Allocation
+is thin provisioning, not reserved disk space. Shared host backing capacity is
+reported separately and deduplicated in namespace queries. File and volume flush
+failures propagate. No hardware power-loss guarantee is inferred from OS success.
+
+Writes remain bounded to 64 KiB and commit before COMPLETE. Atomic append chooses
+EOF in the owner transaction; constrained writes report the bytes committed without
+extending EOF. Shared/exclusive byte-range locks are handle-owned and fail fast,
+with 256 per handle and 4,096 per host. SDK and legacy calls enforce the same locks.
+Version-1 handles retain their invalidation-on-delete/replacement behavior.
+
+An authenticated `filesystem` connection uses the operator certificate but permits
+only filesystem RPCs and kernel discovery. Volume administration, program execution,
+and enrollment are denied. Trust is validated at TLS session establishment;
+certificate expiry, persisted revocation, and current grants remain checked during
+operation dispatch and before mutation commit.
+
+`namespace-v1`, `storage-v2`, and `exchange-retire-v1` are negotiated. RETIRE and
+RETIRE_ACK fence exchange traffic before releasing completed records. IDs increase
+and are never reused. Active plus unretired records stay bounded at 4,096; legacy
+connections keep their lifetime bound. No mutation is reconnected and replayed.
+
+Validation on 2026-09-26: `dotnet test Mainframe.slnx -c Release` passed
+**186 tests** with no skips. Debug builds and provider/client/host tests also pass.
+Coverage includes all creation
+dispositions, metadata/allocation, retained replacement, delete cancellation,
+cleanup versus close, sharing, lock quotas, directory markers and concurrent
+changes, namespace/permission filtering, Unicode mount aliases, and permanent
+invalidation after observed grant loss. Method-specific routing ignores unknown
+optional JSON fields, so those fields cannot select a different volume queue. Migration failure injection preserves
+schema-1 IDs, bytes, and timestamps. Separate Windows host processes are killed
+around durable deletion intent, cleanup, replacement, and reclamation, then reopened.
+
+The transport tests run 10,050 exchanges with bounded records and exercise
+cancellation/retirement races, credit overruns, retained output, and legacy limits.
+A real isolated TLS host also handles 10,050 root queries followed by reading and
+verifying a 257 MiB sparse file on the same connection without reconnecting. Existing
+Hello, execution, ConPTY, SDK authorization, storage, and unrestricted-password
+tests remain in the suite. Tests use isolated state directories and containers,
+never the operator's live volumes or registrations. Shared output is built under
+`bin/Debug/net10.0` and `bin/Release/net10.0`. No WinFsp/Explorer acceptance or Linux
+support is claimed by these tests.
+
+Next is the separate WinFsp adapter: pin and qualify its runtime/.NET binding and
+licenses; use Mainframe.Client without SQLCipher or CLI subprocesses; export a
+selected subtree through drive-letter or directory mount points; implement Windows
+path/security callbacks, NTSTATUS mapping, bounded dispatch, cleanup/close, and
+unmount/disconnect handling. Validate Explorer, copy-in/out, editor replacement,
+sharing and locks concurrent with SDK clients, flush failures, and process loss on
+a real mount. Windows filesystem compatibility is not claimed before that testing.
+Persistent ACLs, alternate streams, reparse points, hard links, compression,
+Windows sparse-file controls, cross-volume rename, and recursive deletion remain
+unsupported. Linux, peers, host-directory providers, and shell filesystem navigation
+remain separate work.

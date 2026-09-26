@@ -70,7 +70,7 @@ public sealed class KernelIntegrationTests(Xunit.Abstractions.ITestOutputHelper 
         using X509Certificate2 cert = store.LoadOperatorCertificate();
         using X509Certificate2 ca = store.LoadCaCertificate();
         await using KernelClient client = await KernelClient.ConnectAsync("127.0.0.1", server.Port, cert, ca, TestContextToken());
-        KernelRpcException error = await Assert.ThrowsAsync<KernelRpcException>(() => client.CallAsync("fs.open"));
+        KernelRpcException error = await Assert.ThrowsAsync<KernelRpcException>(() => client.CallAsync("fs.not-implemented"));
         Assert.Equal("UNSUPPORTED_METHOD", error.Code);
         Assert.Equal("ready", (await client.CallAsync("kernel.health")).GetProperty("status").GetString());
     }
@@ -146,8 +146,13 @@ public sealed class KernelIntegrationTests(Xunit.Abstractions.ITestOutputHelper 
         deadline.Dispose();
         string resolved = Path.GetFullPath(testRoot);
         if (!resolved.StartsWith(Path.GetFullPath(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase) || !Path.GetFileName(resolved).StartsWith("Mainframe-Integration-", StringComparison.Ordinal))
+        {
             throw new InvalidOperationException("Invalid generated test directory.");
+        }
+
         if (Directory.Exists(resolved))
+        {
             Directory.Delete(resolved, recursive: true);
+        }
     }
 }

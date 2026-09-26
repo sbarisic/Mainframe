@@ -22,13 +22,18 @@ public sealed class MainframeProgram : IAsyncDisposable
         while ((count = await pipe.ReadAsync(bytes, timeout.Token)) != 0)
         {
             if (buffer.Length + count > 16384)
+            {
                 throw new InvalidDataException("Bootstrap exceeds limit.");
+            }
+
             buffer.Write(bytes, 0, count);
         }
 
         BootstrapCredential credential = ProtocolJson.Deserialize<BootstrapCredential>(buffer.ToArray());
         return new(await KernelClient.ConnectProgramAsync(credential, timeout.Token));
     }
+
+    public KernelFileSystem Files => client.Files;
 
     public Task<JsonElement> DescribeAsync(CancellationToken token = default) => client.CallAsync("kernel.describe", cancellationToken: token);
     public Task<JsonElement> HealthAsync(CancellationToken token = default) => client.CallAsync("kernel.health", cancellationToken: token);

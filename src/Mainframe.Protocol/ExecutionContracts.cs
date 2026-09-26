@@ -21,5 +21,5 @@ public sealed record AuthenticationResult([property: JsonRequired] bool Ok);
 public sealed record EmptyArguments;
 public static class ExecutionFeatures
 {
-    public static readonly string[] All = ["unary-rpc", "streaming-v1", "execution-v1", "shell-v1"];
+    public static readonly string[] All = ["unary-rpc", "streaming-v1", "execution-v1", "shell-v1", "storage-v1", "namespace-v1", "storage-v2", "exchange-retire-v1"];
 }

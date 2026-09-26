@@ -1,4 +1,4 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><PackageLicenseExpression>MIT</PackageLicenseExpression></PropertyGroup>
-  <ItemGroup><ProjectReference Include="../../src/Mainframe.Sdk/Mainframe.Sdk.csproj" /><ProjectReference Include="../../src/Mainframe.Cli/Mainframe.Cli.csproj" /></ItemGroup>
+  <ItemGroup><ProjectReference Include="../../src/Mainframe.Host/Mainframe.Host.csproj" /><ProjectReference Include="../../src/Mainframe.Sdk/Mainframe.Sdk.csproj" /><ProjectReference Include="../../src/Mainframe.Cli/Mainframe.Cli.csproj" /></ItemGroup>
 </Project>

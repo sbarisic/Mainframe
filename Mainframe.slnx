@@ -1,8 +1,12 @@
 <Solution>
   <Folder Name="/examples/">
+    <Project Path="examples/Mainframe.Ls/Mainframe.Ls.csproj" />
+    <Project Path="examples/Mainframe.Cat/Mainframe.Cat.csproj" />
+    <Project Path="examples/Mainframe.StorageDemo/Mainframe.StorageDemo.csproj" />
     <Project Path="examples/Mainframe.Hello/Mainframe.Hello.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/Mainframe.Storage/Mainframe.Storage.csproj" />
     <Project Path="src/Mainframe.Cli/Mainframe.Cli.csproj" />
     <Project Path="src/Mainframe.Client/Mainframe.Client.csproj" />
     <Project Path="src/Mainframe.Core/Mainframe.Core.csproj" />

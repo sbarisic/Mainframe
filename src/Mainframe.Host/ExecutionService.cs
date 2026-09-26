@@ -17,8 +17,11 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
     public (Func<bool> Valid, Func<string, bool> Allows)? Authenticate(string token)
     {
         if (token.Length != 64 || !bootstraps.TryRemove(Hash(token), out Execution? execution) || clock.GetUtcNow() >= execution.BootstrapExpiry || !execution.Authorized())
+        {
             return null;
-        return (execution.Authorized, method => execution.Permissions.Contains(method) && execution.Authorized());
+        }
+
+        return (execution.Authorized, method => execution.Permissions.Contains(method) && execution.Authorized() && execution.HasGrant(method));
     }
 
     private static string Hash(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
@@ -28,11 +31,20 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
         try
         {
             if (request.Version != 1)
+            {
                 throw new KernelOperationException("UNSUPPORTED_METHOD", "Unsupported method version.");
+            }
+
             if (request.TimeoutMs is > 30000)
+            {
                 throw new ArgumentException("Launch deadline must be at most 30 seconds.");
+            }
+
             if (!session.Allows(request.Method))
+            {
                 throw new KernelOperationException("ACCESS_DENIED", "This identity is not granted that operation.");
+            }
+
             object result;
             switch (request.Method)
             {
@@ -60,7 +72,10 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
                     lock (session.Shells)
                     {
                         if (session.Shells.Count >= 16)
+                        {
                             throw new KernelOperationException("RESOURCE_EXHAUSTED", "Shell session limit reached.");
+                        }
+
                         var shell = new ShellState(Guid.NewGuid().ToString("N"), "/");
                         session.Shells[shell.SessionId] = shell;
                         result = shell;
@@ -106,7 +121,10 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
                             break;
                         case "cd":
                             if (words.Length != 2)
+                            {
                                 throw new ArgumentException("Usage: cd <directory>");
+                            }
+
                             (string Logical, string? Host, string? Root) location = store.ResolveDirectory(state.WorkingDirectory, words[1], session.Principal);
                             state = state with
                             {
@@ -130,13 +148,21 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
                 case "process.interrupt":
                     ProcessControlRequest control = Args<ProcessControlRequest>(request);
                     if (!executions.TryGetValue(control.ProcessId, out Execution? live) || live.Owner != session.Id)
+                    {
                         throw new KernelOperationException("NOT_FOUND", "Execution is unavailable to this session.");
+                    }
+
                     if (request.Method == "process.resize")
+                    {
                         live.Process.Resize(control.Columns, control.Rows);
+                    }
                     else
                     {
                         if (control.Signal is not (null or "interrupt"))
+                        {
                             throw new ArgumentException("Unsupported signal.");
+                        }
+
                         await live.Process.InterruptAsync();
                     }
 
@@ -168,23 +194,35 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
         {
             var startTime = Stopwatch.GetTimestamp();
             if (request.IoMode is not ("pipes" or "terminal") || request.Argv is null || request.Argv.Length > 256 || request.Argv.Any(a => a is null || a.Contains('\0')))
+            {
                 throw new ArgumentException("Invalid process arguments or I/O mode.");
+            }
+
             if (!processSlots.Wait(0))
+            {
                 throw new KernelOperationException("RESOURCE_EXHAUSTED", "Local process limit reached.");
+            }
+
             slotReserved = true;
             ProgramRegistration registration = store.ResolveProgram(request.Program, session.Principal, request.IoMode);
             string directory = registration.Manifest.WorkingDirectory;
             if (request.SessionId is not null)
             {
                 if (!session.BusyShells.TryAdd(request.SessionId, true))
+                {
                     throw new KernelOperationException("RESOURCE_UNAVAILABLE", "Shell already has a foreground execution.");
+                }
+
                 shellLocked = true;
                 ShellState shell = session.GetShell(request.SessionId);
                 (string Logical, string? Host, string? Root) location = store.ResolveDirectory("/", shell.WorkingDirectory, session.Principal);
                 if (location.Host is not null)
                 {
                     if (!registration.Manifest.HostRoots.Contains(location.Root!))
+                    {
                         throw new KernelOperationException("ACCESS_DENIED", "Program manifest does not permit this host root.");
+                    }
+
                     directory = location.Host;
                 }
             }
@@ -195,7 +233,7 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
             recorded = true;
             lifetime.Token.ThrowIfCancellationRequested();
             using var process = WindowsProcess.Start(registration.Manifest, request.Argv, directory, request.IoMode == "terminal", request.Columns, request.Rows, $"127.0.0.1:{port()}");
-            live = new Execution(process, session.Id, permissions, session.Valid, clock);
+            live = new Execution(process, session.Id, permissions, session.Valid, clock, permission => store.HasGrant(session.Principal, permission));
             executions[id] = live;
             string token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
             bootstrapKey = Hash(token);
@@ -205,7 +243,10 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
             await process.Bootstrap.WriteAsync(ProtocolJson.Serialize(credential), lifetime.Token);
             process.Bootstrap.Dispose();
             if (Stopwatch.GetElapsedTime(startTime).TotalMilliseconds >= timeoutMs)
+            {
                 throw new KernelOperationException("DEADLINE_EXCEEDED", "Launch deadline elapsed.");
+            }
+
             lifetime.Token.ThrowIfCancellationRequested();
             store.MarkExecutionRunning(id);
             StreamDescriptor[] channels = request.IoMode == "terminal" ? [new(1, "stdin", "requester"), new(2, "terminal", "responder")] : [new(1, "stdin", "requester"), new(2, "stdout", "responder"), new(3, "stderr", "responder")];
@@ -239,12 +280,17 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
             catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException)
             {
                 if (!cancelled)
+                {
                     throw;
+                }
             }
 
             await exchange.Channel(2).EndAsync();
             if (process.Stderr is not null)
+            {
                 await exchange.Channel(3).EndAsync();
+            }
+
             store.FinishExecution(id, exitCode, cancelled ? "cancelled" : "completed");
             recorded = false;
             await exchange.CompleteAsync(Success(new ProcessExited(exitCode, cancelled)));
@@ -274,14 +320,22 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
             }
 
             if (recorded)
+            {
                 store.FinishExecution(id, null, replied ? "outcome_unknown" : "failed");
+            }
+
             if (!replied && !exchange.ConnectionClosed)
+            {
                 await exchange.ReplyAsync(new(false, false, null, new(ex is OperationCanceledException ? "CANCELLED" : ex is KernelOperationException op ? op.Code : "LAUNCH_FAILED", ex.Message, live is null ? "not_started" : "unknown")));
+            }
             else if (replied && !exchange.ConnectionClosed)
             {
                 await exchange.Channel(2).EndAsync();
                 if (request.IoMode == "pipes")
+                {
                     await exchange.Channel(3).EndAsync();
+                }
+
                 await exchange.CompleteAsync(new(false, false, null, new("EXECUTION_FAILED", "Execution could not complete.", "unknown")));
             }
         }
@@ -289,14 +343,25 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
         {
             lifetime.Cancel();
             if (live is not null)
+            {
                 live.Alive = false;
+            }
+
             if (bootstrapKey is not null)
+            {
                 bootstraps.TryRemove(bootstrapKey, out _);
+            }
+
             executions.TryRemove(id, out _);
             if (shellLocked)
+            {
                 session.BusyShells.TryRemove(request.SessionId!, out _);
+            }
+
             if (slotReserved)
+            {
                 processSlots.Release();
+            }
         }
     }
 
@@ -324,6 +389,7 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
         {
             TimeSpan remaining = live.LeaseExpiry - clock.GetUtcNow();
             if (remaining > TimeSpan.Zero)
+            {
                 try
                 {
                     await Task.Delay(remaining, lifetime.Token);
@@ -331,6 +397,7 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
                 catch (OperationCanceledException)
                 {
                 }
+            }
 
             live.Alive = false;
             lifetime.Cancel();
@@ -344,7 +411,9 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
         {
             int count;
             while ((count = await source.ReadAsync(buffer, token)) > 0)
+            {
                 await target.SendAsync(buffer.AsMemory(0, count), token);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -386,7 +455,10 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
     public static string[] ParseCommand(string line)
     {
         if (line.Length > 32767)
+        {
             throw new ArgumentException("Command is too long.");
+        }
+
         var words = new List<string>();
         var word = new StringBuilder();
         char quote = '\0';
@@ -404,9 +476,14 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
             if (quote != '\0')
             {
                 if (c == quote)
+                {
                     quote = '\0';
+                }
                 else
+                {
                     word.Append(c);
+                }
+
                 present = true;
                 continue;
             }
@@ -419,7 +496,10 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
             }
 
             if (c is '|' or '<' or '>' or '$' or '`' or '&' or ';')
+            {
                 throw new ArgumentException("Shell operators and expansion are not supported.");
+            }
+
             if (char.IsWhiteSpace(c))
             {
                 if (present)
@@ -437,17 +517,24 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
         }
 
         if (quote != '\0')
+        {
             throw new ArgumentException("Unclosed quote.");
+        }
+
         if (present)
+        {
             words.Add(word.ToString());
+        }
+
         return words.ToArray();
     }
 
-    private sealed class Execution(WindowsProcess process, string owner, string[] permissions, Func<bool> operatorValid, TimeProvider clock)
+    private sealed class Execution(WindowsProcess process, string owner, string[] permissions, Func<bool> operatorValid, TimeProvider clock, Func<string, bool> hasGrant)
     {
         public WindowsProcess Process { get; } = process;
         public string Owner { get; } = owner;
         public string[] Permissions { get; } = permissions;
+        public Func<string, bool> HasGrant { get; } = hasGrant;
         public DateTimeOffset BootstrapExpiry { get; } = clock.GetUtcNow().AddSeconds(30);
 
         private long expiryTicks = clock.GetUtcNow().AddSeconds(60).UtcTicks;
@@ -461,10 +548,11 @@ internal sealed class ExecutionService(KernelStore store, Func<int> port, Action
     }
 }
 
-internal sealed class OperatorSession(string principal, Func<bool> valid, Func<string, bool> allows)
+internal sealed class OperatorSession(string principal, Func<bool> valid, Func<string, bool> allows, bool isOperator = true)
 {
     public string Id { get; } = Guid.NewGuid().ToString("N");
     public string Principal { get; } = principal;
+    public bool IsOperator { get; } = isOperator;
     public Func<bool> Valid { get; } = valid;
     public Func<string, bool> Allows { get; } = allows;
     public ConcurrentDictionary<string, ShellState> Shells { get; } = new();

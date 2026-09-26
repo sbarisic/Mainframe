@@ -29,11 +29,15 @@ public sealed class KernelServer : IAsyncDisposable
     private bool disposed;
     private readonly FileStream ownership;
     private readonly ExecutionService execution;
+    private readonly StorageService storage;
     private readonly ConcurrentDictionary<long, WireConnection> wires = new();
-    public KernelServer(KernelStore store, int port = 7443, Action<string>? log = null, TimeProvider? timeProvider = null)
+    public KernelServer(KernelStore store, int port = 7443, Action<string>? log = null, TimeProvider? timeProvider = null, Action<string>? storageFault = null)
     {
         if (port is < 0 or > 65535)
+        {
             throw new ArgumentOutOfRangeException(nameof(port));
+        }
+
         this.store = store;
         this.log = log ?? (_ =>
         {
@@ -49,7 +53,11 @@ public sealed class KernelServer : IAsyncDisposable
             loadedServer = store.LoadServerCertificate();
             loadedCa = store.LoadCaCertificate();
             if (!CertificateTrust.Validate(loadedServer, loadedCa, CertificateTrust.ServerAuthentication))
+            {
                 throw new AuthenticationException("Kernel certificate is invalid or expired.");
+            }
+
+            storage = new StorageService(store, storageFault, this.log);
             serverCertificate = loadedServer;
             caCertificate = loadedCa;
         }
@@ -69,7 +77,10 @@ public sealed class KernelServer : IAsyncDisposable
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         if (acceptLoop is not null)
+        {
             throw new InvalidOperationException("Kernel already started.");
+        }
+
         listener.Start(32);
         dispatcher = new KernelDispatcher(store.Identity, DateTimeOffset.UtcNow, () => ActiveConnections);
         acceptLoop = AcceptAsync();
@@ -131,7 +142,10 @@ public sealed class KernelServer : IAsyncDisposable
         using (var ssl = new SslStream(client.GetStream(), false, (_, cert, _, _) =>
         {
             if (cert is null)
+            {
                 return true; // Restricted bootstrap only; operational dispatch remains unauthenticated.
+            }
+
             using var presented = new X509Certificate2(cert);
             return CertificateTrust.Validate(presented, caCertificate, CertificateTrust.ClientAuthentication) && store.IsOperatorAuthorized(presented);
         }))
@@ -139,7 +153,10 @@ public sealed class KernelServer : IAsyncDisposable
             try
             {
                 if (!handshakeSlots.Wait(0))
+                {
                     return;
+                }
+
                 try
                 {
                     using var handshake = CancellationTokenSource.CreateLinkedTokenSource(stop);
@@ -156,17 +173,23 @@ public sealed class KernelServer : IAsyncDisposable
                 application.CancelAfter(TimeSpan.FromSeconds(10));
                 Frame? first = await FrameCodec.ReadAsync(ssl, application.Token);
                 if (first is null || first.Type != FrameType.Hello)
+                {
                     throw new ProtocolException("HELLO required.");
+                }
+
                 HelloRequest hello = ProtocolJson.Deserialize<HelloRequest>(first.Payload);
-                if (!hello.Versions.Contains(1) || hello.Role is not ("terminal" or "program") || hello.RequiredFeatures.Any(f => !ExecutionFeatures.All.Contains(f)) || !hello.RequiredFeatures.Concat(hello.OptionalFeatures).Contains("unary-rpc") || hello.MaxFrameBytes < 1024)
+                if (!hello.Versions.Contains(1) || hello.Role is not ("terminal" or "program" or "filesystem") || hello.RequiredFeatures.Any(f => !ExecutionFeatures.All.Contains(f)) || !hello.RequiredFeatures.Concat(hello.OptionalFeatures).Contains("unary-rpc") || hello.MaxFrameBytes < 1024)
                 {
                     await FrameCodec.WriteAsync(ssl, new(FrameType.GoAway, 0, 0, ProtocolJson.Serialize(new GoAwayMessage("Unsupported version, role, or feature."))), application.Token);
                     return;
                 }
 
-                bool operatorRole = hello.Role == "terminal" && remote is not null && store.IsOperatorAuthorized(remote);
-                if (hello.Role == "terminal" && !operatorRole)
+                bool operatorRole = hello.Role is "terminal" or "filesystem" && remote is not null && store.IsOperatorAuthorized(remote);
+                if (hello.Role is "terminal" or "filesystem" && !operatorRole)
+                {
                     throw new AuthenticationException("Operator certificate required.");
+                }
+
                 var features = ExecutionFeatures.All.Intersect(hello.RequiredFeatures.Concat(hello.OptionalFeatures)).ToArray();
                 await FrameCodec.WriteAsync(ssl, new(FrameType.Welcome, 0, 0, ProtocolJson.Serialize(new WelcomeResponse(1, features, store.Identity.KernelId, store.Identity.MainframeId, hello.MaxFrameBytes, operatorRole ? "authenticated" : "required"))), application.Token);
                 Func<bool> valid;
@@ -175,14 +198,17 @@ public sealed class KernelServer : IAsyncDisposable
                 if (operatorRole)
                 {
                     principal = store.GetOperatorIdentity(remote!)!;
-                    valid = () => store.IsOperatorAuthorized(remote!);
+                    valid = store.CreateOperatorSessionValidator(remote!);
                     allows = method => store.HasGrant(principal, method);
                 }
                 else
                 {
                     Frame? authFrame = await FrameCodec.ReadAsync(ssl, application.Token);
                     if (authFrame?.Type != FrameType.Auth)
+                    {
                         throw new AuthenticationException("Bootstrap AUTH required.");
+                    }
+
                     BootstrapAuth auth = ProtocolJson.Deserialize<BootstrapAuth>(authFrame.Payload);
                     (Func<bool> Valid, Func<string, bool> Allows) authorization = execution.Authenticate(auth.Token) ?? throw new AuthenticationException("Invalid bootstrap.");
                     valid = authorization.Valid;
@@ -191,14 +217,32 @@ public sealed class KernelServer : IAsyncDisposable
                     await FrameCodec.WriteAsync(ssl, new(FrameType.AuthResult, 0, 0, ProtocolJson.Serialize(new AuthenticationResult(true))), application.Token);
                 }
 
-                var session = new OperatorSession(principal, valid, allows);
-                await using var wire = new WireConnection(ssl, false, hello.MaxFrameBytes, valid);
+                var session = new OperatorSession(principal, valid, allows, operatorRole && hello.Role != "filesystem");
+                await using var wire = new WireConnection(ssl, false, hello.MaxFrameBytes, valid, features.Contains("exchange-retire-v1"));
                 wire.RequestHandler = (exchange, request) =>
                 {
+                    if (hello.Role == "filesystem" && !request.Method.StartsWith("fs.", StringComparison.Ordinal) && !request.Method.StartsWith("kernel.", StringComparison.Ordinal))
+                        return exchange.ReplyAsync(KernelDispatcher.Error("ACCESS_DENIED", "Filesystem connections permit only filesystem operations and kernel discovery."));
+                    if (request.Method.StartsWith("fs.", StringComparison.Ordinal) || request.Method.StartsWith("volume.", StringComparison.Ordinal))
+                    {
+                        if (request.Version == 2 && (!features.Contains("storage-v2") || !features.Contains("namespace-v1")) || !features.Contains("storage-v1") || !features.Contains("streaming-v1"))
+                        {
+                            return exchange.ReplyAsync(KernelDispatcher.Error("UNSUPPORTED_METHOD", "Storage and streaming features were not negotiated."));
+                        }
+
+                        return storage.HandleAsync(exchange, request, session);
+                    }
+
                     if (!request.Method.StartsWith("kernel.", StringComparison.Ordinal) && !features.Contains("execution-v1"))
+                    {
                         return exchange.ReplyAsync(KernelDispatcher.Error("UNSUPPORTED_METHOD", "Execution feature was not negotiated."));
+                    }
+
                     if (request.Method.StartsWith("shell.", StringComparison.Ordinal) && !features.Contains("shell-v1") || request.Method is "process.start" or "shell.command" && !features.Contains("streaming-v1"))
+                    {
                         return exchange.ReplyAsync(KernelDispatcher.Error("UNSUPPORTED_METHOD", "Required shell/streaming features were not negotiated."));
+                    }
+
                     return execution.HandleAsync(exchange, request, session, dispatcher!);
                 };
                 long wireId = Interlocked.Increment(ref nextConnection);
@@ -210,13 +254,17 @@ public sealed class KernelServer : IAsyncDisposable
                 }
                 finally
                 {
+                    await wire.DisposeAsync();
+                    await storage.ReleaseSessionAsync(session.Id);
                     wires.TryRemove(wireId, out _);
                 }
             }
             catch (Exception ex) when (ex is AuthenticationException or IOException or OperationCanceledException or SocketException or System.Text.Json.JsonException or CryptographicException or Microsoft.Data.Sqlite.SqliteException or UnauthorizedAccessException)
             {
                 if (!stop.IsCancellationRequested)
+                {
                     log($"Connection ended ({ex.GetType().Name}).");
+                }
             }
         }
     }
@@ -224,21 +272,31 @@ public sealed class KernelServer : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (disposed)
+        {
             return;
+        }
+
         disposed = true;
         listener.Stop();
         await Task.WhenAll(wires.Values.Select(w => w.DrainAsync()));
         await stopping.CancelAsync();
         if (acceptLoop is not null)
+        {
             await acceptLoop;
+        }
+
         foreach (TcpClient client in clients.Values)
+        {
             client.Dispose();
+        }
+
         try
         {
             await Task.WhenAll(connections.Values);
         }
         finally
         {
+            storage.Dispose();
             ownership.Dispose();
             serverCertificate.Dispose();
             caCertificate.Dispose();

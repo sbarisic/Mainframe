@@ -1,0 +1,35 @@
+{
+  "sqlcipher": {
+    "version": "4.19.0",
+    "url": "https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v4.19.0.tar.gz",
+    "sha256": "7075f96cbabe45b4ecfc2e6b1745a625f856f695b0827a5506ce9ed85b906aa0",
+    "commit": "c4b275a47932888216bade83aff2bbc73df0ff85"
+  },
+  "openssl": {
+    "version": "3.5.8",
+    "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz",
+    "sha256": "a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2",
+    "commit": "f4dc4d58b48d346a8270183f89acf826d459b0ca"
+  },
+  "perl": {
+    "version": "5.42.3.1",
+    "url": "https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54231_64bit/strawberry-perl-5.42.3.1-64bit-portable.zip",
+    "sha256": "6a081a811781c30aca51dbc036afd93092af91e3297901f02c17043795a10690"
+  },
+  "compiler": "MSVC 14.44.35207 x64 (Visual Studio 2022), /O2 /MT",
+  "opensslOptions": [
+    "VC-WIN64A",
+    "no-asm",
+    "no-shared",
+    "no-tests"
+  ],
+  "cipherOptions": [
+    "SQLITE_HAS_CODEC",
+    "SQLCIPHER_CRYPTO_OPENSSL",
+    "SQLITE_TEMP_STORE=3",
+    "SQLITE_THREADSAFE=1",
+    "SQLITE_ENABLE_COLUMN_METADATA",
+    "SQLITE_EXTRA_INIT=sqlcipher_extra_init",
+    "SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown"
+  ]
+}

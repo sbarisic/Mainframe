@@ -9,6 +9,7 @@ for the wire protocol. The current execution milestone is tested on Windows only
 ## Run
 
 ```powershell
+./native/build.ps1 # First build only; requires Visual Studio 2022 C++ tools
 dotnet build Mainframe.slnx
 dotnet run --project src/Mainframe.Cli -- cluster init --name atlas
 dotnet run --project src/Mainframe.Host -- serve
@@ -192,7 +193,7 @@ kernel calls do not need the SDK.
 Local defaults are 32 connections, eight concurrent TLS handshakes, 64 foreground
 processes, 16 shell sessions per connection, 128 registered programs and host roots,
 and a 4 KiB serialized manifest. RPC connections permit 128 active exchanges,
-eight channels per exchange, and 4,096 lifetime exchange records. Streaming uses
+eight channels per exchange, and 4,096 active/unretired exchange records (lifetime for legacy peers). Streaming uses
 64 KiB receive windows within a bounded connection budget. Queries and launches
 have a ten-second client deadline; program runtime does not inherit that deadline.
 
@@ -201,24 +202,21 @@ graceful termination before the Job Object is terminated. Host shutdown permits
 a ten-second transport drain. Startup marks unfinished execution records
 `outcome_unknown`; it never retries them. There are no durable background jobs yet.
 
-State schema 1 migrates transactionally to schema 2. Newer schemas are rejected.
+State schemas 1 and 2 migrate transactionally to schema 3; volume mount records contain no passwords. Newer schemas are rejected.
 The initial local operator has an explicit persisted wildcard grant. Program RPCs
-are further restricted to declared kernel-query permissions. Multi-user grant
+are further restricted to declared kernel-query and volume-scoped permissions. Multi-user grant
 administration, network enrollment/automatic renewal, peer delegation, Linux PTYs,
-filesystems, and public endpoint hardening remain later work.
+host-directory/remote filesystems, and public endpoint hardening remain later work.
 
-## Next milestone: encrypted local storage (planned)
+## Encrypted local storage (Windows)
 
-The next implementation adds password-unlocked binary containers mounted at
-`/vol/<name>`. It is documented in [plan.md](plan.md#next-milestone-local-encrypted-volumes).
-No volume commands, filesystem SDK methods, or encryption provider exist yet.
-Current `/host/<name>` entries only select host working directories.
+Encrypted SQLCipher containers (`.mfv`) mount at `/vol/<name>`. They hold filenames,
+metadata, and 64 KiB content chunks. The SDK accesses this namespace over TLS;
+ordinary `System.IO` still accesses the host disk. `/host` remains working-directory
+navigation. There is no Windows drive export or remote-volume routing yet.
 
-Each `.mfv` will contain encrypted filenames, metadata, and 64 KiB content chunks,
-using a validated SQLCipher native build. Programs will access files through the
-SDK; this does not mount a Windows drive or change ordinary `System.IO` paths.
-
-Proposed commands, for after implementation:
+Build the native engine as described below, build the solution, and start the host.
+The parent directory of the container must already exist on a fixed local disk:
 
 ```powershell
 mframe volume create E:\Mainframe\Data\documents.mfv
@@ -227,18 +225,75 @@ mframe volume list
 mframe volume unmount /vol/documents
 ```
 
-Create/mount prompt for passwords; no password argument or saved unlock secret is
-planned. Creation leaves the volume unmounted. Configured mounts restart locked.
-There is no password recovery or automatic unlock. Unmount requires no active file
-handles and leaves host data intact. Copy a container only after successful clean
-unmount; WAL/SHM recovery sidecars are allowed while live and must survive crashes.
+Create prompts for a password and confirmation, then leaves the volume unmounted.
+Mount prompts once. Passwords have no minimum length, password-specific maximum,
+or character restrictions; empty passwords are accepted and still enable encryption.
+Passwords are never trimmed or normalized. The normal RPC frame-size limit applies. There
+are no password arguments, saved keys, automatic unlock, or password recovery.
+Configured mounts restart locked. Unmount requires no open handles or in-flight
+storage operations and never deletes the container.
 
-The milestone includes bounded file RPCs, SDK streams, volume permissions,
-transactional writes, atomic same-volume replacement, and Windows crash-recovery
-acceptance. Separate `ls`, `cat`, and storage-demo programs will exercise the SDK.
-Host-directory storage, remote volumes, Linux acceptance, saved keys/rekeying,
-live backup tooling, and WinFsp follow later. The encryption dependency and native
-packaging still require validation; Mainframe remains MIT with dependency notices.
+WAL/SHM recovery sidecars are allowed while live or after a crash. Preserve them.
+Copy the `.mfv` alone only after a successful clean unmount. Filenames/content are
+encrypted; the host container path, mount name, UUID, file size, and recovery-file
+headers are not secret. An unlocked kernel can see plaintext. Managed password
+strings, paging, and crash dumps prevent a guarantee of complete memory erasure.
+
+Programs declare `volume:<uuid>:read` and/or `volume:<uuid>:write` in manifest
+permissions. Use the UUID printed by create/list. File access requires the
+intersection with current operator grants. Programs cannot administer volumes.
+`MainframeProgram.Files` provides async metadata and file operations:
+
+```csharp
+await using MainframeProgram kernel = await MainframeProgram.ConnectAsync();
+await using KernelFileStream file = await kernel.Files.OpenAsync(
+    "/vol/documents/notes.txt", "read-write", "open-or-create");
+await file.WriteAsync("Hello from Mainframe"u8.ToArray());
+await file.FlushAsync();
+```
+
+This snippet belongs inside an explicit `Program.Main`; import `Mainframe.Sdk`
+and `Mainframe.Client`. Streams support seeking, length, truncation, synchronous
+and asynchronous calls, and disposal. Prefer async calls. File content/metadata
+are not cached across RPCs, and failed mutations are not automatically retried.
+
+The solution builds standalone `Mainframe.Ls.exe`, `Mainframe.Cat.exe`, and
+`Mainframe.StorageDemo.exe`. Register each as an installed program using the Hello
+manifest pattern: change identity/executable, use empty fixed arguments, and declare
+volume grants. Register no host roots unless needed for host working directories.
+For identities `examples/ls`, `examples/cat`, and `examples/storage-demo`:
+
+```powershell
+mframe exec ls /vol/documents
+mframe exec storage-demo /vol/documents
+# The demo prints the path of its verified, atomically published binary file.
+mframe exec cat /vol/documents/<printed-demo-directory>/nested/data.bin
+```
+
+`cat` sends raw bytes to stdout. Test it with redirection for binary data. The demo
+creates a unique directory on each run; it does not overwrite existing documents.
+
+Managed writes acknowledge after FULL transaction commit. Each RPC write is at
+most 64 KiB; larger SDK writes split into separate commits. Publish complete files
+through create-new temporary names, flush, close, and same-volume rename/replace.
+Version-2 handles support byte-range locks. Cross-volume rename, links, and recursive deletion remain unsupported.
+Deletion and replacement require delete sharing from every open handle. Successful
+deletion or replacement invalidates version-1 handles to the removed entry.
+Version-2 handles retain the detached object until final close.
+See [plan.md](plan.md#local-encrypted-volumes) for lifecycle details.
+
+## Native database build
+
+The Windows x64 database engine is SQLCipher Community Edition 4.19.0 built with
+OpenSSL 3.5.8. Run `./native/build.ps1` before the first managed build. It downloads
+hash-pinned source archives and a project-local Windows Perl tool, requires Visual
+Studio 2022 C++ build tools, and writes `artifacts/native/runtime/sqlite3.dll`.
+The first build takes several minutes. Later .NET builds copy the runtime to the
+shared output directory. There is no fallback to the ordinary SQLite bundle.
+See `native/dependencies.json` for the pinned sources and compiler settings.
+
+SQLCipher uses its BSD-style community license; OpenSSL uses Apache-2.0. Their
+notices are in `native/SQLCipher-LICENSE.txt` and `native/OpenSSL-LICENSE.txt`.
 
 ## Verification
 
@@ -267,3 +322,49 @@ user-facing documentation, and prohibits linking or distributing the software
 with proprietary software. It also permits redistribution of unmodified official
 WinFsp installers. WinFsp itself retains its own license. Review the selected
 release's terms when implementing and distributing the adapter.
+
+
+## Virtual root and writable backend
+
+After restarting your host with this build, `mframe exec ls` lists `/` by default:
+
+```powershell
+mframe exec ls
+mframe exec ls /
+mframe exec ls /vol
+mframe exec ls /vol/documents
+```
+
+`/` contains `vol/`. `/vol` lists readable configured mounts, including locked ones.
+Unlock a locked container with `mframe volume mount` as before. Container schema 1
+is upgraded transactionally to schema 2 on mount; passwords and encryption settings
+are unchanged. Keep the existing clean-unmount backup procedure. Do not copy only
+the main container while it is mounted or discard recovery sidecars after a crash.
+
+Existing SDK streams remain supported. Advanced clients can use directory and file
+handles, explicit rights, metadata, allocation, atomic append, locks, and separate
+cleanup/final-close operations:
+
+```csharp
+await using KernelFileHandle directory = await kernel.Files.OpenHandleAsync(
+    new FsOpenV2("/vol/documents", Kind: "directory",
+        Rights: ["list", "read-metadata"], Share: ["read", "write", "delete"]));
+FsListing batch = await directory.EnumerateAsync();
+```
+
+`Mainframe.Client` supplies the handle and `Mainframe.Protocol` supplies its options.
+Programs still need their volume UUID grants in the manifest. `DiscoverAsync`
+reports capabilities and shared host capacity. Allocation growth does not reserve
+physical space. Retained handles can read an old object after atomic replacement;
+legacy stream handles keep their previous invalidation behavior. Cleanup releases
+sharing and locks, while final disposal closes the object.
+
+`KernelClient.ConnectFilesystemAsync` uses an operator certificate with a restricted
+filesystem role. It cannot execute programs or administer volumes. Negotiated
+exchange retirement allows connections to outlive 4,096 calls without reconnecting
+or replaying mutations. This is backend preparation only: no WinFsp installation,
+Windows drive, Explorer integration, or filesystem navigation in the shell is added.
+The final Release suite passes 186 tests, including isolated host crash recovery and
+a 257 MiB read after 10,050 queries on one connection. See
+[the backend acceptance record](plan.md#virtual-root-and-writable-backend-september-2026)
+for build/test evidence and the remaining adapter work.

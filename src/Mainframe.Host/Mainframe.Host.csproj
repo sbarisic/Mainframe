@@ -11,6 +11,7 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../Mainframe.Storage/Mainframe.Storage.csproj" />
     <ProjectReference Include="../Mainframe.Core/Mainframe.Core.csproj" />
     <ProjectReference Include="../Mainframe.Protocol/Mainframe.Protocol.csproj" />
     <None Include="../../LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

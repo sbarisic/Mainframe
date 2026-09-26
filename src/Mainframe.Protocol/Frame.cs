@@ -10,6 +10,8 @@ public enum FrameType : ushort
     Response = 0x0011,
     Complete = 0x0012,
     Cancel = 0x0013,
+    Retire = 0x0014,
+    RetireAck = 0x0015,
     Data = 0x0020,
     EndStream = 0x0021,
     WindowUpdate = 0x0022,

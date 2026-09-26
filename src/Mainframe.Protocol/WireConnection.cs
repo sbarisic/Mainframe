@@ -9,7 +9,12 @@ public sealed class WireConnection : IAsyncDisposable
 {
     internal readonly CancellationTokenSource Lifetime = new();
     internal readonly SemaphoreSlim InboundSlots = new(96, 96); // 6 MiB of reserved receive windows.
+    internal readonly SemaphoreSlim StorageSlots = new(4, 4); // Each operation reserves 256 KiB, including provider scratch.
     private readonly SemaphoreSlim outboundSlots = new(96, 96);
+    internal readonly ConcurrentDictionary<WireChannel, byte> BufferedChannels = new();
+    private readonly bool retirement;
+    private readonly Dictionary<ulong, HashSet<PendingWrite>> pendingByExchange = new();
+    public int RetainedExchangeCount => exchanges.Count + completedExchanges.Count;
     private readonly Stream stream;
     private readonly bool connector;
     private readonly int maxPayload;
@@ -42,14 +47,17 @@ public sealed class WireConnection : IAsyncDisposable
         get
         {
             lock (sendGate)
-                return (96 - InboundSlots.CurrentCount) * 65536 + dataBytes + controlBytes + Volatile.Read(ref requestBytes);
+            {
+                return (96 - InboundSlots.CurrentCount) * 65536 + dataBytes + controlBytes + Volatile.Read(ref requestBytes) + (4 - StorageSlots.CurrentCount) * 262144;
+            }
         }
     }
 
     internal int MaximumPayload => maxPayload;
 
-    public WireConnection(Stream stream, bool connector, int maxPayload = FrameCodec.MaxPayloadBytes, Func<bool>? authorized = null)
+    public WireConnection(Stream stream, bool connector, int maxPayload = FrameCodec.MaxPayloadBytes, Func<bool>? authorized = null, bool retirement = false)
     {
+        this.retirement = retirement;
         this.stream = stream;
         this.connector = connector;
         this.maxPayload = maxPayload;
@@ -70,7 +78,10 @@ public sealed class WireConnection : IAsyncDisposable
         try
         {
             if (draining || Lifetime.IsCancellationRequested)
+            {
                 throw new IOException("Connection is closed or draining.");
+            }
+
             ulong id = nextId;
             nextId = checked(nextId + 2);
             WireExchange exchange = AddExchange(id, true);
@@ -86,7 +97,10 @@ public sealed class WireConnection : IAsyncDisposable
     private WireExchange AddExchange(ulong id, bool requester)
     {
         if (exchanges.Count + completedExchanges.Count >= 4096)
+        {
             throw new ProtocolException("Exchange bookkeeping limit reached.");
+        }
+
         if (Interlocked.Increment(ref active) > 128)
         {
             Interlocked.Decrement(ref active);
@@ -95,30 +109,99 @@ public sealed class WireConnection : IAsyncDisposable
 
         var exchange = new WireExchange(this, id, requester);
         if (!exchanges.TryAdd(id, exchange))
+        {
             throw new ProtocolException("Exchange ID collision.");
+        }
+
         return exchange;
     }
 
     internal void Terminal(ulong id, bool requester, Dictionary<uint, WireChannel> channels)
     {
-        completedExchanges[id] = new(requester, channels);
-        exchanges.TryRemove(id, out _);
-        Interlocked.Decrement(ref active);
+        CompletedExchange completed;
+        lock (sendGate)
+        {
+            Task fence = pendingByExchange.TryGetValue(id, out var pending) ? Task.WhenAll(pending.Select(p => p.Done.Task)) : Task.CompletedTask;
+            completed = new(requester, channels) { Fence = fence };
+            completedExchanges[id] = completed;
+            exchanges.TryRemove(id, out WireExchange? exchange);
+            completed.RetireReceived = exchange?.RetireReceived == true;
+            Interlocked.Decrement(ref active);
+        }
+        if (retirement && (requester || completed.RetireReceived)) _ = RetireAsync(id, completed);
+    }
+
+    private async Task RetireAsync(ulong id, CompletedExchange completed)
+    {
+        if (Interlocked.Exchange(ref completed.RetirementStarted, 1) != 0) return;
+        try
+        {
+            await completed.Fence.WaitAsync(Closed);
+            if (completed.Requester)
+            {
+                completed.RetireSent = true;
+                await SendAsync(new(FrameType.Retire, id, 0, []));
+            }
+            else
+            {
+                await SendAsync(new(FrameType.RetireAck, id, 0, []));
+                completedExchanges.TryRemove(id, out _);
+            }
+        }
+        catch (Exception ex) { Fail(ex); }
+    }
+
+    private void ReceiveRetirement(Frame frame)
+    {
+        if (!retirement) throw new ProtocolException("Retirement was not negotiated.");
+        lock (sendGate)
+        {
+            if (completedExchanges.TryGetValue(frame.ExchangeId, out CompletedExchange? completed))
+            {
+                if (frame.Type == FrameType.Retire)
+                {
+                    if (completed.Requester || completed.RetireReceived) throw new ProtocolException("Unexpected RETIRE.");
+                    completed.RetireReceived = true;
+                    _ = RetireAsync(frame.ExchangeId, completed);
+                }
+                else
+                {
+                    if (!completed.Requester || !completed.RetireSent) throw new ProtocolException("Unexpected RETIRE_ACK.");
+                    completedExchanges.TryRemove(frame.ExchangeId, out _);
+                }
+            }
+            else if (frame.Type == FrameType.Retire && exchanges.TryGetValue(frame.ExchangeId, out WireExchange? exchange))
+            {
+                exchange.AcceptRetire();
+            }
+            else throw new ProtocolException("Retirement for unknown exchange.");
+        }
     }
 
     private sealed record CompletedExchange(bool Requester, Dictionary<uint, WireChannel> Channels)
     {
+        public Task Fence { get; init; } = Task.CompletedTask;
+        public int RetirementStarted;
+        public volatile bool RetireReceived;
+        public volatile bool RetireSent;
         public void Receive(Frame frame)
         {
+            if (RetireReceived) throw new ProtocolException("Frame after RETIRE.");
             if (frame.Type == FrameType.Cancel && !Requester)
             {
                 if (ProtocolJson.Deserialize<JsonElement>(frame.Payload).ValueKind != JsonValueKind.Object)
+                {
                     throw new ProtocolException("Invalid cancellation.");
+                }
+
                 return;
             }
 
             if (frame.Type is not (FrameType.Data or FrameType.EndStream or FrameType.WindowUpdate) || !Channels.TryGetValue(frame.ChannelId, out WireChannel? channel))
+            {
                 throw new ProtocolException("Illegal frame for completed exchange.");
+            }
+
             channel.Receive(frame, true);
         }
     }
@@ -126,34 +209,60 @@ public sealed class WireConnection : IAsyncDisposable
     public async Task DrainAsync()
     {
         if (Lifetime.IsCancellationRequested)
+        {
             return;
+        }
+
         draining = true;
         try
         {
             await SendAsync(new(FrameType.GoAway, 0, 0, ProtocolJson.Serialize(new GoAwayMessage("Host shutting down.", 10000))));
             var deadline = Stopwatch.StartNew();
             while (Volatile.Read(ref active) > 0 && deadline.Elapsed < TimeSpan.FromSeconds(10) && !Closed.IsCancellationRequested)
+            {
                 await Task.Delay(25, Closed);
+            }
         }
         catch (Exception ex) when (ex is IOException or OperationCanceledException)
         {
         }
     }
 
-    internal Task SendAsync(Frame frame, CancellationToken token = default)
+    internal Task SendAsync(Frame frame, CancellationToken token = default, Func<bool>? beforeEnqueue = null)
     {
         token.ThrowIfCancellationRequested();
         if (Lifetime.IsCancellationRequested)
+        {
             throw new IOException("Connection closed.");
+        }
+
         if (frame.Payload.Length > maxPayload)
+        {
             throw new ProtocolException("Frame exceeds negotiated payload limit.");
+        }
+
         var pending = new PendingWrite(frame);
         lock (sendGate)
         {
+            if (retirement && frame.ExchangeId != 0 && frame.Type is not (FrameType.Retire or FrameType.RetireAck))
+            {
+                // A terminal exchange cannot produce more traffic. Existing queued writes
+                // are fenced before RETIRE; racing channel producers are discarded here.
+                if (completedExchanges.ContainsKey(frame.ExchangeId) || !exchanges.ContainsKey(frame.ExchangeId)) return Task.CompletedTask;
+            }
+            if (beforeEnqueue is not null && !beforeEnqueue()) return Task.CompletedTask;
+            if (frame.ExchangeId != 0)
+            {
+                if (!pendingByExchange.TryGetValue(frame.ExchangeId, out var pendingSet)) pendingByExchange[frame.ExchangeId] = pendingSet = new();
+                pendingSet.Add(pending);
+            }
             if (frame.Type == FrameType.Data)
             {
                 if (dataBytes + frame.Payload.Length > 6 * 1024 * 1024)
+                {
                     throw new ProtocolException("Outbound buffer limit reached.");
+                }
+
                 dataBytes += frame.Payload.Length;
                 (ulong ExchangeId, uint ChannelId) key = (frame.ExchangeId, frame.ChannelId);
                 if (!data.TryGetValue(key, out Queue<PendingWrite>? queue))
@@ -168,7 +277,10 @@ public sealed class WireConnection : IAsyncDisposable
             else
             {
                 if (controls.Count >= 1024 || controlBytes + frame.Payload.Length > 1024 * 1024)
+                {
                     throw new ProtocolException("Control buffer limit reached.");
+                }
+
                 controlBytes += frame.Payload.Length;
                 controls.Enqueue(pending);
             }
@@ -205,16 +317,22 @@ public sealed class WireConnection : IAsyncDisposable
                 lock (sendGate)
                 {
                     if (controls.Count > 0)
+                    {
                         pending = controls.Dequeue();
+                    }
                     else
                     {
                         (ulong, uint) key = ready.Dequeue();
                         Queue<PendingWrite> queue = data[key];
                         pending = queue.Dequeue();
                         if (queue.Count == 0)
+                        {
                             data.Remove(key);
+                        }
                         else
+                        {
                             ready.Enqueue(key);
+                        }
                     }
                 }
 
@@ -240,10 +358,19 @@ public sealed class WireConnection : IAsyncDisposable
                 {
                     lock (sendGate)
                     {
+                        if (pendingByExchange.TryGetValue(pending.Frame.ExchangeId, out var pendingSet))
+                        {
+                            pendingSet.Remove(pending);
+                            if (pendingSet.Count == 0) pendingByExchange.Remove(pending.Frame.ExchangeId);
+                        }
                         if (pending.Frame.Type == FrameType.Data)
+                        {
                             dataBytes -= pending.Frame.Payload.Length;
+                        }
                         else
+                        {
                             controlBytes -= pending.Frame.Payload.Length;
+                        }
                     }
                 }
             }
@@ -262,7 +389,10 @@ public sealed class WireConnection : IAsyncDisposable
             {
                 Frame frame = await FrameCodec.ReadAsync(stream, maxPayload, Closed) ?? throw new IOException("Peer disconnected.");
                 if (authorized is not null && !authorized())
+                {
                     throw new IOException("Identity revoked or expired.");
+                }
+
                 Volatile.Write(ref lastTraffic, Stopwatch.GetTimestamp());
                 switch (frame.Type)
                 {
@@ -271,7 +401,10 @@ public sealed class WireConnection : IAsyncDisposable
                         break;
                     case FrameType.Pong:
                         if (ping is null || !frame.Payload.AsSpan().SequenceEqual(ping))
+                        {
                             throw new ProtocolException("Unexpected PONG.");
+                        }
+
                         ping = null;
                         break;
                     case FrameType.GoAway:
@@ -279,9 +412,16 @@ public sealed class WireConnection : IAsyncDisposable
                         draining = true;
                         _ = CloseAfterDrainAsync(goaway.DrainTimeoutMs ?? 10000);
                         break;
+                    case FrameType.Retire:
+                    case FrameType.RetireAck:
+                        ReceiveRetirement(frame);
+                        break;
                     case FrameType.Request:
                         if (draining || frame.ExchangeId <= lastRemote || frame.ExchangeId % 2 == (connector ? 1UL : 0UL))
+                        {
                             throw new ProtocolException("Invalid request ID or draining connection.");
+                        }
+
                         if (exchanges.Count + completedExchanges.Count >= 4096)
                         {
                             await SendAsync(new(FrameType.GoAway, 0, 0, ProtocolJson.Serialize(new GoAwayMessage("Exchange bookkeeping limit reached.", 0))));
@@ -290,7 +430,10 @@ public sealed class WireConnection : IAsyncDisposable
 
                         lastRemote = frame.ExchangeId;
                         if (Interlocked.Add(ref requestBytes, frame.Payload.Length) > 1024 * 1024)
+                        {
                             throw new ProtocolException("Pending request buffer limit reached.");
+                        }
+
                         RpcRequest request = ProtocolJson.Deserialize<RpcRequest>(frame.Payload);
                         WireExchange exchange = AddExchange(frame.ExchangeId, false);
                         var handler = Task.Run(() => DispatchAsync(exchange, request, frame.Payload.Length));
@@ -299,11 +442,18 @@ public sealed class WireConnection : IAsyncDisposable
                         break;
                     default:
                         if (exchanges.TryGetValue(frame.ExchangeId, out WireExchange? existing))
+                        {
                             existing.Receive(frame);
+                        }
                         else if (completedExchanges.TryGetValue(frame.ExchangeId, out CompletedExchange? completed))
+                        {
                             completed.Receive(frame);
+                        }
                         else
+                        {
                             throw new ProtocolException("Unknown exchange.");
+                        }
+
                         break;
                 }
             }
@@ -319,7 +469,10 @@ public sealed class WireConnection : IAsyncDisposable
         try
         {
             if (RequestHandler is null)
+            {
                 throw new ProtocolException("Peer requests are unavailable.");
+            }
+
             await RequestHandler(exchange, request);
         }
         catch (Exception ex)
@@ -358,10 +511,16 @@ public sealed class WireConnection : IAsyncDisposable
             {
                 await Task.Delay(TimeSpan.FromSeconds(1), Closed);
                 if (authorized is not null && !authorized())
+                {
                     throw new IOException("Identity revoked or expired.");
+                }
+
                 TimeSpan idle = Stopwatch.GetElapsedTime(Volatile.Read(ref lastTraffic));
                 if (idle >= TimeSpan.FromSeconds(30))
+                {
                     throw new IOException("Peer is unresponsive.");
+                }
+
                 if (idle >= TimeSpan.FromSeconds(10) && ping is null)
                 {
                     ping = RandomNumberGenerator.GetBytes(8);
@@ -378,14 +537,23 @@ public sealed class WireConnection : IAsyncDisposable
     internal void Fail(Exception error)
     {
         if (!Lifetime.IsCancellationRequested)
+        {
             Lifetime.Cancel();
+        }
+
         IOException failure = error as IOException ?? new IOException("Connection failed.", error);
         foreach (WireExchange exchange in exchanges.Values)
+        {
             exchange.Fail(failure);
+        }
+
         lock (sendGate)
         {
             foreach (PendingWrite? item in controls.Concat(data.Values.SelectMany(q => q)))
+            {
                 item.Done.TrySetException(failure);
+            }
+
             controls.Clear();
             data.Clear();
             ready.Clear();
@@ -395,14 +563,23 @@ public sealed class WireConnection : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0)
+        {
             return;
+        }
+
         Fail(new IOException("Connection disposed."));
         await stream.DisposeAsync();
         await Task.WhenAll(new[] { reader, writer, heartbeat }.OfType<Task>());
         await Task.WhenAll(handlers.Values);
+        foreach (WireChannel channel in BufferedChannels.Keys) channel.Terminate(false);
         foreach (CompletedExchange record in completedExchanges.Values)
+        {
             foreach (WireChannel channel in record.Channels.Values)
+            {
                 channel.Terminate(false);
+            }
+        }
+
         completedExchanges.Clear();
     }
 
@@ -419,6 +596,7 @@ public sealed class WireExchange
     private readonly object gate = new();
     private bool responded, terminal;
     private readonly CancellationTokenSource cancelled;
+    private readonly CancellationTokenRegistration connectionCancellation;
     public ulong Id
     {
         get;
@@ -437,26 +615,49 @@ public sealed class WireExchange
         this.connection = connection;
         Id = id;
         Requester = requester;
-        cancelled = CancellationTokenSource.CreateLinkedTokenSource(connection.Closed);
+        cancelled = new CancellationTokenSource();
+        connectionCancellation = connection.Closed.Register(() => cancelled.Cancel());
+    }
+
+    public async Task<IDisposable> ReserveStorageBufferAsync(CancellationToken token)
+    {
+        await connection.StorageSlots.WaitAsync(token);
+        return new StorageReservation(connection.StorageSlots);
+    }
+
+    private sealed class StorageReservation(SemaphoreSlim slots) : IDisposable
+    {
+        public void Dispose() => slots.Release();
     }
 
     public WireChannel Channel(uint id)
     {
         lock (gate)
+        {
             return channels.TryGetValue(id, out WireChannel? channel) ? channel : throw new ProtocolException("Unknown channel.");
+        }
     }
 
     private void Declare(RpcResponse response)
     {
         if (!response.Streaming)
+        {
             return;
-        ProcessStarted started = ProtocolJson.Deserialize<ProcessStarted>(ProtocolJson.Serialize(response.Result!.Value));
+        }
+
+        StorageStarted started = ProtocolJson.Deserialize<StorageStarted>(ProtocolJson.Serialize(response.Result!.Value));
         if (started.Channels is null || started.Channels.Length is < 1 or > 8)
+        {
             throw new ProtocolException("Invalid channel count.");
+        }
+
         foreach (StreamDescriptor descriptor in started.Channels)
         {
             if (descriptor.Id == 0 || descriptor.Sender is not ("requester" or "responder") || channels.ContainsKey(descriptor.Id))
+            {
                 throw new ProtocolException("Invalid channel declaration.");
+            }
+
             channels.Add(descriptor.Id, new WireChannel(connection, this, descriptor.Id, (descriptor.Sender == "requester") == Requester));
         }
     }
@@ -466,22 +667,32 @@ public sealed class WireExchange
         lock (gate)
         {
             if (Requester || responded)
+            {
                 throw new ProtocolException("Duplicate response.");
+            }
+
             responded = true;
             Declare(response);
         }
 
+        if (!response.Streaming) retirementExpected = true;
         await connection.SendAsync(new(FrameType.Response, Id, 0, ProtocolJson.Serialize(response)));
         if (!response.Streaming)
+        {
             End();
+        }
         else
+        {
             StartReceivers();
+        }
     }
 
     private void StartReceivers()
     {
         foreach (WireChannel? channel in channels.Values.Where(c => !c.Sending))
+        {
             channel.Start();
+        }
     }
 
     public async Task CompleteAsync(RpcResponse result)
@@ -489,24 +700,39 @@ public sealed class WireExchange
         lock (gate)
         {
             if (Requester || !responded || terminal || channels.Values.Any(c => c.Sending && !c.Ended))
+            {
                 throw new ProtocolException("Output must end before COMPLETE.");
+            }
         }
 
+        retirementExpected = true;
         await connection.SendAsync(new(FrameType.Complete, Id, 0, ProtocolJson.Serialize(result)));
         Completion.TrySetResult(result);
         End();
     }
 
+    internal volatile bool RetireReceived;
+    private volatile bool retirementExpected;
+    internal void AcceptRetire()
+    {
+        if (Requester || !retirementExpected || RetireReceived) throw new ProtocolException("Premature or duplicate RETIRE.");
+        RetireReceived = true;
+    }
+
     public Task CancelAsync() => connection.SendAsync(new(FrameType.Cancel, Id, 0, "{}"u8.ToArray()));
     internal void Receive(Frame frame)
     {
+        if (RetireReceived) throw new ProtocolException("Frame after RETIRE.");
         lock (gate)
         {
             switch (frame.Type)
             {
                 case FrameType.Response:
                     if (!Requester || responded || terminal)
+                    {
                         throw new ProtocolException("Unexpected RESPONSE.");
+                    }
+
                     RpcResponse response = ProtocolJson.Deserialize<RpcResponse>(frame.Payload);
                     responded = true;
                     Declare(response);
@@ -516,23 +742,38 @@ public sealed class WireExchange
                         End();
                     }
                     else
+                    {
                         StartReceivers();
+                    }
+
                     Response.TrySetResult(response);
                     break;
                 case FrameType.Complete:
                     if (!Requester || !responded || terminal || channels.Count == 0 || channels.Values.Any(c => !c.Sending && !c.Ended))
+                    {
                         throw new ProtocolException("Unexpected COMPLETE or missing output EOF.");
+                    }
+
                     RpcResponse completed = ProtocolJson.Deserialize<RpcResponse>(frame.Payload);
                     if (completed.Streaming)
+                    {
                         throw new ProtocolException("COMPLETE cannot start another stream.");
+                    }
+
                     End(preserveOutput: true);
                     Completion.TrySetResult(completed);
                     break;
                 case FrameType.Cancel:
                     if (ProtocolJson.Deserialize<JsonElement>(frame.Payload).ValueKind != JsonValueKind.Object)
+                    {
                         throw new ProtocolException("Invalid cancellation.");
+                    }
+
                     if (Requester)
+                    {
                         throw new ProtocolException("Only requesters cancel exchanges.");
+                    }
+
                     cancelled.Cancel();
                     break;
                 case FrameType.Data:
@@ -551,11 +792,17 @@ public sealed class WireExchange
         lock (gate)
         {
             if (terminal)
+            {
                 return;
+            }
+
             terminal = true;
+            connectionCancellation.Unregister();
             connection.Terminal(Id, Requester, channels);
             foreach (WireChannel channel in channels.Values)
+            {
                 channel.Terminate(preserveOutput && !channel.Sending);
+            }
         }
     }
 
@@ -577,6 +824,7 @@ public sealed class WireChannel
     private readonly object gate = new();
     private readonly SemaphoreSlim sendLock = new(1);
     private readonly CancellationTokenSource lifetime;
+    private readonly CancellationTokenRegistration connectionCancellation;
     private TaskCompletionSource changed = Signal();
     private byte[]? ring;
     private int readPosition, count, receiveCredit, sendCredit;
@@ -601,7 +849,8 @@ public sealed class WireChannel
         exchangeId = exchange.Id;
         this.id = id;
         Sending = sending;
-        lifetime = CancellationTokenSource.CreateLinkedTokenSource(connection.Closed);
+        lifetime = new CancellationTokenSource();
+        connectionCancellation = connection.Closed.Register(() => lifetime.Cancel());
         Input = new InputStream(this);
     }
 
@@ -620,11 +869,12 @@ public sealed class WireChannel
                 }
 
                 reserved = true;
+                connection.BufferedChannels[this] = 0;
                 ring = new byte[65536];
-                receiveCredit = ring.Length;
+                receiveCredit = 0;
             }
 
-            await connection.SendAsync(new(FrameType.WindowUpdate, exchangeId, id, ProtocolJson.Serialize(new WindowCredit(65536))), lifetime.Token);
+            await GrantAsync(65536, lifetime.Token);
         }
         catch (OperationCanceledException)
         {
@@ -635,6 +885,17 @@ public sealed class WireChannel
         }
     }
 
+    private Task GrantAsync(int bytes, CancellationToken token) => connection.SendAsync(
+        new(FrameType.WindowUpdate, exchangeId, id, ProtocolJson.Serialize(new WindowCredit(bytes))), token, () =>
+        {
+            lock (gate)
+            {
+                if (terminal || Ended) return false;
+                receiveCredit = checked(receiveCredit + bytes);
+                return true;
+            }
+        });
+
     internal void Receive(Frame frame, bool completed)
     {
         lock (gate)
@@ -644,18 +905,30 @@ public sealed class WireChannel
                 case FrameType.WindowUpdate:
                     int credit = ProtocolJson.Deserialize<WindowCredit>(frame.Payload).Credit;
                     if (!Sending || credit <= 0 || credit > 262144 - sendCredit)
+                    {
                         throw new ProtocolException("Invalid stream credit.");
+                    }
+
                     sendCredit += credit;
                     Pulse();
                     break;
                 case FrameType.Data:
                     if (Sending || Ended || frame.Payload.Length is <= 0 or > 65536 || frame.Payload.Length > receiveCredit)
+                    {
                         throw new ProtocolException("DATA exceeds credit or stream state.");
+                    }
+
                     receiveCredit -= frame.Payload.Length;
                     if (completed || terminal)
+                    {
                         return; // Only already-authorized bytes may arrive here.
+                    }
+
                     if (ring is null || count + frame.Payload.Length > ring.Length)
+                    {
                         throw new ProtocolException("Receive window exhausted.");
+                    }
+
                     int position = (readPosition + count) % ring.Length;
                     int first = Math.Min(frame.Payload.Length, ring.Length - position);
                     frame.Payload.AsSpan(0, first).CopyTo(ring.AsSpan(position));
@@ -665,11 +938,17 @@ public sealed class WireChannel
                     break;
                 case FrameType.EndStream:
                     if (Sending || Ended)
+                    {
                         throw new ProtocolException("Duplicate or wrong-direction EOF.");
+                    }
+
                     Ended = true;
                     Pulse();
                     if (count == 0)
+                    {
                         Release();
+                    }
+
                     break;
             }
         }
@@ -688,12 +967,19 @@ public sealed class WireChannel
                 lock (gate)
                 {
                     if (!Sending || Ended || terminal)
+                    {
                         throw new IOException("Stream is closed.");
+                    }
+
                     length = Math.Min(Math.Min(Math.Min(65536, connection.MaximumPayload), sendCredit), bytes.Length);
                     if (length == 0)
+                    {
                         wait = changed.Task;
+                    }
                     else
+                    {
                         sendCredit -= length;
+                    }
                 }
 
                 if (wait is not null)
@@ -720,9 +1006,15 @@ public sealed class WireChannel
             lock (gate)
             {
                 if (Ended || terminal)
+                {
                     return;
+                }
+
                 if (!Sending)
+                {
                     throw new InvalidOperationException();
+                }
+
                 Ended = true;
             }
 
@@ -737,7 +1029,10 @@ public sealed class WireChannel
     private async ValueTask<int> ReadAsync(Memory<byte> destination, CancellationToken token)
     {
         if (destination.Length == 0)
+        {
             return 0;
+        }
+
         while (true)
         {
             int length = 0;
@@ -754,15 +1049,19 @@ public sealed class WireChannel
                     readPosition = (readPosition + length) % ring.Length;
                     count -= length;
                     grant = !Ended && !terminal;
-                    if (grant)
-                        receiveCredit += length;
                     if (count == 0 && (Ended || terminal))
+                    {
                         Release();
+                    }
                 }
                 else if (Ended || terminal)
+                {
                     return 0;
+                }
                 else
+                {
                     wait = changed.Task;
+                }
             }
 
             if (wait is not null)
@@ -772,7 +1071,10 @@ public sealed class WireChannel
             }
 
             if (grant)
-                await connection.SendAsync(new(FrameType.WindowUpdate, exchangeId, id, ProtocolJson.Serialize(new WindowCredit(length))), token);
+            {
+                await GrantAsync(length, token);
+            }
+
             return length;
         }
     }
@@ -783,6 +1085,7 @@ public sealed class WireChannel
         {
             terminal = true;
             lifetime.Cancel();
+            connectionCancellation.Unregister();
             if (!preserve || count == 0)
             {
                 count = 0;
@@ -796,6 +1099,7 @@ public sealed class WireChannel
     private void Release()
     {
         ring = null;
+        connection.BufferedChannels.TryRemove(this, out _);
         if (reserved)
         {
             reserved = false;

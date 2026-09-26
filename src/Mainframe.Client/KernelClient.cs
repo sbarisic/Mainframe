@@ -8,7 +8,7 @@ using Mainframe.Protocol;
 
 namespace Mainframe.Client;
 
-public sealed class KernelClient : IAsyncDisposable
+public sealed partial class KernelClient : IAsyncDisposable
 {
     private readonly TcpClient tcp;
     private readonly WireConnection wire;
@@ -26,13 +26,14 @@ public sealed class KernelClient : IAsyncDisposable
     }
 
     public static Task<KernelClient> ConnectAsync(string host, int port, X509Certificate2 clientCertificate, X509Certificate2 caCertificate, CancellationToken cancellationToken = default) => ConnectCoreAsync(host, port, clientCertificate, caCertificate, null, cancellationToken);
+    public static Task<KernelClient> ConnectFilesystemAsync(string host, int port, X509Certificate2 certificate, X509Certificate2 ca, CancellationToken token = default) => ConnectCoreAsync(host, port, certificate, ca, null, token, "filesystem");
     public static async Task<KernelClient> ConnectProgramAsync(BootstrapCredential credential, CancellationToken cancellationToken = default)
     {
         using X509Certificate2 ca = X509CertificateLoader.LoadCertificate(Convert.FromBase64String(credential.CaCertificate));
         return await ConnectCoreAsync(credential.Host, credential.Port, null, ca, credential.Token, cancellationToken);
     }
 
-    private static async Task<KernelClient> ConnectCoreAsync(string host, int port, X509Certificate2? certificate, X509Certificate2 ca, string? bootstrap, CancellationToken token)
+    private static async Task<KernelClient> ConnectCoreAsync(string host, int port, X509Certificate2? certificate, X509Certificate2 ca, string? bootstrap, CancellationToken token, string role = "terminal")
     {
         var tcp = new TcpClient
         {
@@ -56,39 +57,56 @@ public sealed class KernelClient : IAsyncDisposable
 
             using var helloTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             helloTimeout.CancelAfter(10000);
-            var hello = new HelloRequest([1], ExecutionFeatures.All.Where(f => f != "unary-rpc").ToArray(), ["unary-rpc"], bootstrap is null ? "terminal" : "program", "mframe", FrameCodec.MaxPayloadBytes);
+            var hello = new HelloRequest([1], ExecutionFeatures.All.Where(f => f != "unary-rpc").ToArray(), ["unary-rpc"], bootstrap is null ? role : "program", "mframe", FrameCodec.MaxPayloadBytes);
             await FrameCodec.WriteAsync(ssl, new(FrameType.Hello, 0, 0, ProtocolJson.Serialize(hello)), helloTimeout.Token);
             Frame? frame = await FrameCodec.ReadAsync(ssl, helloTimeout.Token);
             if (frame?.Type != FrameType.Welcome)
+            {
                 throw new ProtocolException("Kernel did not accept HELLO.");
+            }
+
             WelcomeResponse welcome = ProtocolJson.Deserialize<WelcomeResponse>(frame.Payload);
             if (welcome.Version != 1 || !welcome.Features.Contains("unary-rpc") || welcome.Features.Any(f => !ExecutionFeatures.All.Contains(f)))
+            {
                 throw new ProtocolException("Unsupported negotiated protocol.");
+            }
+
             if (bootstrap is not null)
             {
                 if (welcome.Authentication != "required")
+                {
                     throw new AuthenticationException("Expected bootstrap authentication.");
+                }
+
                 await FrameCodec.WriteAsync(ssl, new(FrameType.Auth, 0, 0, ProtocolJson.Serialize(new BootstrapAuth(bootstrap))), helloTimeout.Token);
                 Frame? auth = await FrameCodec.ReadAsync(ssl, helloTimeout.Token);
                 if (auth?.Type != FrameType.AuthResult || !ProtocolJson.Deserialize<AuthenticationResult>(auth.Payload).Ok)
+                {
                     throw new AuthenticationException("Bootstrap rejected.");
+                }
             }
             else if (welcome.Authentication != "authenticated")
+            {
                 throw new AuthenticationException("Operator authentication failed.");
-            return new(tcp, new WireConnection(ssl, true, welcome.MaxFrameBytes), welcome);
+            }
+
+            return new(tcp, new WireConnection(ssl, true, welcome.MaxFrameBytes, retirement: welcome.Features.Contains("exchange-retire-v1")), welcome);
         }
         catch
         {
             if (ssl is not null)
+            {
                 await ssl.DisposeAsync();
+            }
+
             tcp.Dispose();
             throw;
         }
     }
 
-    public async Task<JsonElement> CallAsync(string method, object? arguments = null, CancellationToken cancellationToken = default)
+    public async Task<JsonElement> CallAsync(string method, object? arguments = null, CancellationToken cancellationToken = default, int version = 1)
     {
-        KernelInvocation call = await BeginAsync(method, arguments, cancellationToken);
+        KernelInvocation call = await BeginAsync(method, arguments, cancellationToken, version);
         if (call.Response.Streaming)
         {
             await call.Exchange.CancelAsync();
@@ -98,11 +116,11 @@ public sealed class KernelClient : IAsyncDisposable
         return call.Response.Result!.Value;
     }
 
-    public async Task<KernelInvocation> BeginAsync(string method, object? arguments = null, CancellationToken cancellationToken = default)
+    public async Task<KernelInvocation> BeginAsync(string method, object? arguments = null, CancellationToken cancellationToken = default, int version = 1)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(10000);
-        WireExchange exchange = await wire.RequestAsync(new(method, 1, 10000, ProtocolJson.ToElement(arguments ?? new EmptyArguments())), timeout.Token);
+        WireExchange exchange = await wire.RequestAsync(new(method, version, 10000, ProtocolJson.ToElement(arguments ?? new EmptyArguments())), timeout.Token);
         try
         {
             RpcResponse response = await exchange.Response.Task.WaitAsync(timeout.Token);
@@ -138,18 +156,26 @@ public sealed class KernelClient : IAsyncDisposable
     internal static void Check(RpcResponse response)
     {
         if (!response.Ok)
+        {
             throw new KernelRpcException(response.Error!.Code, response.Error.Message, response.Error.Outcome);
+        }
     }
 
     private static bool ValidateServerCertificate(X509Certificate? certificate, SslPolicyErrors errors, X509Certificate2 root)
     {
         if (certificate is null || (errors & (SslPolicyErrors.RemoteCertificateNotAvailable | SslPolicyErrors.RemoteCertificateNameMismatch)) != 0)
+        {
             return false;
+        }
+
         using var server = new X509Certificate2(certificate);
         X509BasicConstraintsExtension[] constraints = server.Extensions.OfType<X509BasicConstraintsExtension>().ToArray();
         X509EnhancedKeyUsageExtension[] usages = server.Extensions.OfType<X509EnhancedKeyUsageExtension>().ToArray();
         if (constraints.Length != 1 || constraints[0].CertificateAuthority || usages.Length != 1 || !usages[0].EnhancedKeyUsages.Cast<Oid>().Any(oid => oid.Value == "1.3.6.1.5.5.7.3.1"))
+        {
             return false;
+        }
+
         using var chain = new X509Chain();
         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
         chain.ChainPolicy.CustomTrustStore.Add(root);

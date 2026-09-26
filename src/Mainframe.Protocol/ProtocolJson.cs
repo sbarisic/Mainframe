@@ -12,10 +12,16 @@ public static class ProtocolJson
     public static byte[] Serialize<T>(T value)
     {
         if (value is null)
+        {
             return "null"u8.ToArray();
+        }
+
         byte[] bytes = value is JsonNode node ? JsonSerializer.SerializeToUtf8Bytes(node, Context.JsonNode) : JsonSerializer.SerializeToUtf8Bytes(value, GetTypeInfo(value.GetType()));
         if (bytes.Length > FrameCodec.MaxPayloadBytes)
+        {
             throw new ProtocolException("JSON payload exceeds the frame limit.");
+        }
+
         return bytes;
     }
 
@@ -27,7 +33,10 @@ public static class ProtocolJson
         {
             object? value = JsonSerializer.Deserialize(payload, GetTypeInfo(typeof(T)));
             if (value is not T typed)
+            {
                 throw new ProtocolException("A non-null JSON control object is required.");
+            }
+
             ValidateContract(typed);
             return typed;
         }
@@ -42,7 +51,10 @@ public static class ProtocolJson
         if (value is JsonElement element)
         {
             if (element.ValueKind == JsonValueKind.Undefined)
+            {
                 throw new ProtocolException("Undefined JSON is not a valid argument.");
+            }
+
             return element.Clone();
         }
 
@@ -55,7 +67,10 @@ public static class ProtocolJson
     public static void ValidateJson(ReadOnlySpan<byte> payload)
     {
         if (payload.Length > FrameCodec.MaxPayloadBytes)
+        {
             throw new ProtocolException("JSON payload exceeds the frame limit.");
+        }
+
         try
         {
             var reader = new Utf8JsonReader(payload, new JsonReaderOptions { MaxDepth = MaxDepth });
@@ -74,13 +89,18 @@ public static class ProtocolJson
                         break;
                     case JsonTokenType.PropertyName:
                         if (!objects.Peek().Add(reader.GetString()!))
+                        {
                             throw new ProtocolException("Duplicate JSON property names are forbidden.");
+                        }
+
                         break;
                 }
             }
 
             if (!any || reader.CurrentDepth != 0)
+            {
                 throw new ProtocolException("A complete JSON value is required.");
+            }
         }
         catch (JsonException ex)
         {
@@ -118,7 +138,10 @@ public static class ProtocolJson
             case RpcResponse response:
                 Require(response.Ok ? response.Error is null && response.Result is not null : response.Error is not null && !response.Streaming && response.Result is null, "Inconsistent RPC response.");
                 if (response.Error is { } responseError)
+                {
                     ValidateContract(responseError);
+                }
+
                 break;
             case RpcError error:
                 Require(!string.IsNullOrWhiteSpace(error.Code) && error.Code.Length <= 128, "Invalid RPC error code.");
@@ -142,7 +165,9 @@ public static class ProtocolJson
     private static void Require(bool condition, string message)
     {
         if (!condition)
+        {
             throw new ProtocolException(message);
+        }
     }
 }
 
@@ -153,6 +178,37 @@ public static class ProtocolJson
 [JsonSerializable(typeof(ProgramRegistration[]))]
 [JsonSerializable(typeof(RegisterProgramRequest))]
 [JsonSerializable(typeof(SelectorRequest))]
+[JsonSerializable(typeof(VolumeCreateRequest))]
+[JsonSerializable(typeof(VolumeMountRequest))]
+[JsonSerializable(typeof(VolumeInfo))]
+[JsonSerializable(typeof(VolumeInfo[]))]
+[JsonSerializable(typeof(VolumeCreated))]
+[JsonSerializable(typeof(FsOpenV2))]
+[JsonSerializable(typeof(FsOpenedV2))]
+[JsonSerializable(typeof(FsEnumerate))]
+[JsonSerializable(typeof(FsRenameHandle))]
+[JsonSerializable(typeof(FsMetadata))]
+[JsonSerializable(typeof(FsSize))]
+[JsonSerializable(typeof(FsDisposition))]
+[JsonSerializable(typeof(FsLock))]
+[JsonSerializable(typeof(FsWriteV2))]
+[JsonSerializable(typeof(FsCapabilities))]
+[JsonSerializable(typeof(FsSpace))]
+[JsonSerializable(typeof(FsDiscovery))]
+[JsonSerializable(typeof(FsStat))]
+[JsonSerializable(typeof(FsPath))]
+[JsonSerializable(typeof(FsRename))]
+[JsonSerializable(typeof(FsList))]
+[JsonSerializable(typeof(FsEntry))]
+[JsonSerializable(typeof(FsListing))]
+[JsonSerializable(typeof(FsOpen))]
+[JsonSerializable(typeof(FsOpened))]
+[JsonSerializable(typeof(FsHandle))]
+[JsonSerializable(typeof(FsRange))]
+[JsonSerializable(typeof(FsTruncate))]
+[JsonSerializable(typeof(StorageStarted))]
+[JsonSerializable(typeof(FsTransferred))]
+[JsonSerializable(typeof(FsCommitted))]
 [JsonSerializable(typeof(HostRoot))]
 [JsonSerializable(typeof(HostRoot[]))]
 [JsonSerializable(typeof(ProcessStartRequest))]

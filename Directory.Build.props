@@ -3,4 +3,10 @@
     <!-- One runnable directory per configuration/framework. Keep obj project-local. -->
     <BaseOutputPath>$(MSBuildThisFileDirectory)bin/</BaseOutputPath>
   </PropertyGroup>
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)native/*-LICENSE.txt" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)artifacts/native/runtime/sqlite3.dll')">
+    <None Include="$(MSBuildThisFileDirectory)artifacts/native/runtime/sqlite3.dll" Link="sqlite3.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

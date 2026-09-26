@@ -8,7 +8,7 @@ namespace Mainframe.Host;
 public sealed class KernelDispatcher
 {
     private readonly Dictionary<string, Func<JsonElement>> handlers;
-    public static readonly Capability[] Capabilities = [new("kernel.describe", 1, "Kernel and mainframe identity."), new("kernel.health", 1, "Live host health."), new("kernel.capabilities", 1, "Implemented syscall contracts."), new("program.register", 1, "Register an installed program manifest."), new("program.list", 1, "List registrations and compatibility."), new("program.remove", 1, "Remove a qualified registration."), new("host-root.add", 1, "Approve a named host working-directory root."), new("host-root.list", 1, "List approved host roots."), new("host-root.remove", 1, "Remove a host root."), new("shell.open", 1, "Open a connection-bound shell."), new("shell.command", 1, "Evaluate a simple shell command."), new("process.start", 1, "Launch a registered foreground process."), new("process.resize", 1, "Resize a running pseudoconsole."), new("process.interrupt", 1, "Send a console interrupt.")];
+    public static readonly Capability[] Capabilities = [new("fs.open", 2, "Writable filesystem backend."), new("fs.stat", 2, "Writable filesystem backend."), new("fs.enumerate", 2, "Writable filesystem backend."), new("fs.read", 2, "Writable filesystem backend."), new("fs.write", 2, "Writable filesystem backend."), new("fs.rename", 2, "Writable filesystem backend."), new("fs.metadata", 2, "Writable filesystem backend."), new("fs.size", 2, "Writable filesystem backend."), new("fs.disposition", 2, "Writable filesystem backend."), new("fs.cleanup", 2, "Writable filesystem backend."), new("fs.close", 2, "Writable filesystem backend."), new("fs.lock", 2, "Writable filesystem backend."), new("fs.unlock", 2, "Writable filesystem backend."), new("fs.flush", 2, "Writable filesystem backend."), new("fs.flush-volume", 2, "Writable filesystem backend."), new("fs.discover", 2, "Writable filesystem backend."), new("volume.create", 1, "Local encrypted storage."), new("volume.mount", 1, "Local encrypted storage."), new("volume.list", 1, "Local encrypted storage."), new("volume.unmount", 1, "Local encrypted storage."), new("fs.list", 1, "Local encrypted storage."), new("fs.stat", 1, "Local encrypted storage."), new("fs.mkdir", 1, "Local encrypted storage."), new("fs.delete", 1, "Local encrypted storage."), new("fs.rename", 1, "Local encrypted storage."), new("fs.open", 1, "Local encrypted storage."), new("fs.read", 1, "Local encrypted storage."), new("fs.write", 1, "Local encrypted storage."), new("fs.truncate", 1, "Local encrypted storage."), new("fs.flush", 1, "Local encrypted storage."), new("fs.close", 1, "Local encrypted storage."), new("kernel.describe", 1, "Kernel and mainframe identity."), new("kernel.health", 1, "Live host health."), new("kernel.capabilities", 1, "Implemented syscall contracts."), new("program.register", 1, "Register an installed program manifest."), new("program.list", 1, "List registrations and compatibility."), new("program.remove", 1, "Remove a qualified registration."), new("host-root.add", 1, "Approve a named host working-directory root."), new("host-root.list", 1, "List approved host roots."), new("host-root.remove", 1, "Remove a host root."), new("shell.open", 1, "Open a connection-bound shell."), new("shell.command", 1, "Evaluate a simple shell command."), new("process.start", 1, "Launch a registered foreground process."), new("process.resize", 1, "Resize a running pseudoconsole."), new("process.interrupt", 1, "Send a console interrupt.")];
     public KernelDispatcher(KernelIdentity identity, DateTimeOffset startedAt, Func<int> connectionCount)
     {
         handlers = new(StringComparer.Ordinal)
@@ -22,11 +22,20 @@ public sealed class KernelDispatcher
     public RpcResponse Dispatch(RpcRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Method) || request.Version < 1 || request.TimeoutMs is <= 0 or > 30000)
+        {
             return Error("INVALID_ARGUMENT", "Invalid method, version, or timeout (1..30000 ms).");
+        }
+
         if (request.Version != 1 || !handlers.TryGetValue(request.Method, out Func<JsonElement>? handler))
+        {
             return Error("UNSUPPORTED_METHOD", "This kernel does not implement that method/version.");
+        }
+
         if (request.Arguments.ValueKind != JsonValueKind.Object || request.Arguments.EnumerateObject().Any())
+        {
             return Error("INVALID_ARGUMENT", "This method expects an empty arguments object.");
+        }
+
         return new RpcResponse(true, false, handler(), null);
     }
 

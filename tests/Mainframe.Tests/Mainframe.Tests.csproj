@@ -8,6 +8,9 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../../examples/Mainframe.Ls/Mainframe.Ls.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../../examples/Mainframe.Cat/Mainframe.Cat.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../../examples/Mainframe.StorageDemo/Mainframe.StorageDemo.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../examples/Mainframe.Hello/Mainframe.Hello.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../Mainframe.Fixtures/Mainframe.Fixtures.csproj" ReferenceOutputAssembly="false" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
@@ -19,6 +22,8 @@
   </ItemGroup>
   <ItemGroup><Using Include="Xunit" /></ItemGroup>
   <ItemGroup>
+    <None Include="../../docs/protocol/storage-write-v2-retire.hex" Link="Fixtures/storage-write-v2-retire.hex" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../docs/protocol/storage-write-v1.hex" Link="Fixtures/storage-write-v1.hex" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../docs/protocol/hello-v1.hex" Link="Fixtures/hello-v1.hex" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../docs/protocol/window-update-v1.hex" Link="Fixtures/window-update-v1.hex" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../docs/protocol/process-start-v1.hex" Link="Fixtures/process-start-v1.hex" CopyToOutputDirectory="PreserveNewest" />

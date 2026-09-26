@@ -1,0 +1,807 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mainframe:protocol:storage-v1",
+  "title": "Mainframe local encrypted storage v1",
+  "$defs": {
+    "create": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "password": {
+          "type": "string",
+          "writeOnly": true,
+          "description": "Sensitive; no normalization, length policy, or character restrictions. Empty strings are valid. The normal RPC frame-size limit applies."
+        }
+      },
+      "required": [
+        "path",
+        "password"
+      ],
+      "additionalProperties": true
+    },
+    "mount": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "mount": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "password": {
+          "type": "string",
+          "writeOnly": true,
+          "description": "Sensitive; no normalization, length policy, or character restrictions. Empty strings are valid. The normal RPC frame-size limit applies."
+        }
+      },
+      "required": [
+        "path",
+        "mount",
+        "password"
+      ],
+      "additionalProperties": true
+    },
+    "path": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": true
+    },
+    "stat": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "handle": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": true,
+      "oneOf": [
+        {
+          "required": [
+            "path"
+          ],
+          "not": {
+            "required": [
+              "handle"
+            ]
+          }
+        },
+        {
+          "required": [
+            "handle"
+          ],
+          "not": {
+            "required": [
+              "path"
+            ]
+          }
+        }
+      ]
+    },
+    "open": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "access": {
+          "enum": [
+            "read",
+            "write",
+            "read-write"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "open-existing",
+            "create-new",
+            "open-or-create",
+            "truncate-existing"
+          ]
+        },
+        "share": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "read",
+              "write",
+              "delete"
+            ]
+          },
+          "maxItems": 3,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": true
+    },
+    "range": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative decimal integer no greater than Int64.MaxValue; checked by receiver."
+        },
+        "length": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative decimal integer no greater than Int64.MaxValue; checked by receiver."
+        }
+      },
+      "required": [
+        "handle",
+        "offset",
+        "length"
+      ],
+      "additionalProperties": true,
+      "description": "Read/write length at most 65536 bytes; offset + length must fit Int64."
+    },
+    "handle": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "handle"
+      ],
+      "additionalProperties": true
+    },
+    "truncate": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "length": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative decimal integer no greater than Int64.MaxValue; checked by receiver."
+        }
+      },
+      "required": [
+        "handle",
+        "length"
+      ],
+      "additionalProperties": true
+    },
+    "rename": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "destination": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "replace": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source",
+        "destination"
+      ],
+      "additionalProperties": true
+    },
+    "list": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "continuation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": true
+    },
+    "entry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "directory": {
+          "type": "boolean"
+        },
+        "length": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative decimal integer no greater than Int64.MaxValue; checked by receiver."
+        },
+        "created": {
+          "type": "string"
+        },
+        "modified": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "directory",
+        "length",
+        "created",
+        "modified"
+      ],
+      "additionalProperties": true
+    },
+    "opened": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "entry": {
+          "$ref": "#/$defs/entry"
+        }
+      },
+      "required": [
+        "handle",
+        "entry"
+      ],
+      "additionalProperties": true
+    },
+    "listing": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/entry"
+          }
+        },
+        "continuation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "entries"
+      ],
+      "additionalProperties": true
+    },
+    "volume": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "mount": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "locked",
+            "mounted"
+          ]
+        },
+        "generation": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "durability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "mount",
+        "state",
+        "generation"
+      ],
+      "additionalProperties": true
+    },
+    "created": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": true
+    },
+    "transferred": {
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": "string",
+          "pattern": "^[0-9]{1,19}$",
+          "description": "Nonnegative decimal integer no greater than Int64.MaxValue; checked by receiver."
+        },
+        "eof": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "bytes"
+      ],
+      "additionalProperties": true
+    },
+    "committed": {
+      "type": "object",
+      "properties": {
+        "committed": {
+          "const": true
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    },
+    "started": {
+      "type": "object",
+      "properties": {
+        "channels": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "const": 1
+              },
+              "name": {
+                "const": "data"
+              },
+              "sender": {
+                "enum": [
+                  "requester",
+                  "responder"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "sender"
+            ],
+            "additionalProperties": true
+          }
+        }
+      },
+      "required": [
+        "channels"
+      ],
+      "additionalProperties": true
+    },
+    "request": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "volume.create"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/create"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "volume.mount"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/mount"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "volume.list"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "volume.unmount"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/path"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "fs.list"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/list"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "fs.stat"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/stat"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "fs.mkdir"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/path"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "fs.delete"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/path"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "fs.rename"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/rename"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "fs.open"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/open"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "fs.read"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/range"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "fs.write"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/range"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "fs.truncate"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/truncate"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "fs.flush"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/handle"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "fs.close"
+            },
+            "version": {
+              "const": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000
+            },
+            "arguments": {
+              "$ref": "#/$defs/handle"
+            }
+          },
+          "required": [
+            "method",
+            "version",
+            "arguments"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    }
+  }
+}

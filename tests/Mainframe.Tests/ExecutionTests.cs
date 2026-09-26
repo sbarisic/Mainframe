@@ -52,7 +52,10 @@ public sealed class ExecutionTests(Xunit.Abstractions.ITestOutputHelper output) 
         deadline.Dispose();
         string resolved = Path.GetFullPath(root);
         if (!resolved.StartsWith(Path.GetFullPath(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase) || !Path.GetFileName(resolved).StartsWith("Mainframe-Execution-"))
+        {
             throw new InvalidOperationException();
+        }
+
         Directory.Delete(resolved, true);
     }
 
@@ -62,7 +65,10 @@ public sealed class ExecutionTests(Xunit.Abstractions.ITestOutputHelper output) 
         using var error = new MemoryStream();
         var outputs = Task.WhenAll(call.Stdout.CopyToAsync(output, deadline.Token), call.Stderr?.CopyToAsync(error, deadline.Token) ?? Task.CompletedTask);
         if (input is not null)
+        {
             await call.WriteInputAsync(input, deadline.Token);
+        }
+
         await call.EndInputAsync();
         ProcessExited result = await call.WaitAsync(deadline.Token);
         await outputs;
@@ -92,17 +98,28 @@ public sealed class ExecutionTests(Xunit.Abstractions.ITestOutputHelper output) 
     }
 
     [Fact]
-    public async Task SdkUsesScopedBootstrapAndNamedWorkingDirectory()
+    public async Task NamedWorkingDirectoryIsPassedToChild()
     {
-        await client.RegisterProgramAsync(HelloManifest());
+        await client.RegisterProgramAsync(Manifest("working-directory"));
         await client.AddHostRootAsync(new("workspace", root));
         ShellState shell = await client.OpenShellAsync();
         KernelInvocation cd = await client.ExecuteShellAsync(new(shell.SessionId, "cd /host/workspace"));
         Assert.Equal("/host/workspace", KernelClient.Decode<ShellState>(cd.Response.Result!.Value).WorkingDirectory);
         (string Output, string Error, int Code) result = await Collect(await client.StartProcessAsync(new("test", ["Alice"], SessionId: shell.SessionId), deadline.Token));
-        Assert.Contains("Hello Alice from execution-test", result.Output);
         Assert.Contains(root, result.Output);
         Assert.Equal(0, result.Code);
+    }
+
+    [Fact]
+    public async Task StandaloneHelloUsesSdkAndExitsSuccessfully()
+    {
+        await client.RegisterProgramAsync(HelloManifest());
+        var result = await Collect(await client.StartProcessAsync(new("test", ["Alice"]), deadline.Token));
+        Assert.Contains("Hello Alice from execution-test", result.Output);
+        Assert.Contains("Hello #4", result.Output);
+        Assert.Contains("Done!", result.Output);
+        Assert.Equal(0, result.Code);
+        Assert.Empty(result.Error);
     }
 
     [Fact]
@@ -322,7 +339,10 @@ public sealed class ExecutionTests(Xunit.Abstractions.ITestOutputHelper output) 
             }
 
             if (exited)
+            {
                 break;
+            }
+
             await Task.Delay(50, deadline.Token);
         }
 
@@ -351,7 +371,10 @@ public sealed class ExecutionTests(Xunit.Abstractions.ITestOutputHelper output) 
             $"127.0.0.1:{server.Port}",
             "test"
         }.Concat(argv))
+        {
             start.ArgumentList.Add(word);
+        }
+
         using Process process = Process.Start(start)!;
         process.StandardInput.Close();
         Task<string> stdout = process.StandardOutput.ReadToEndAsync(deadline.Token);
