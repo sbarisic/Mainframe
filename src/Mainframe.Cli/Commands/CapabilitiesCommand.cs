@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Mainframe.Cli.Commands;
 
 public sealed class CapabilitiesCommand : KernelCommand
@@ -7,7 +9,7 @@ public sealed class CapabilitiesCommand : KernelCommand
 
     protected override async Task ExecuteConnectedAsync(KernelConnection connection, CommandContext context, CancellationToken cancellationToken)
     {
-        var result = await connection.Client.CallAsync("kernel.capabilities", null, cancellationToken);
+        JsonElement result = await connection.Client.CallAsync("kernel.capabilities", null, cancellationToken);
         if (context.Json)
         {
             context.WriteJson(result);
@@ -15,7 +17,7 @@ public sealed class CapabilitiesCommand : KernelCommand
         }
 
         context.Output.WriteLine("SYSCALL                  VERSION  DESCRIPTION");
-        foreach (var capability in result.GetProperty("capabilities").EnumerateArray())
+        foreach (JsonElement capability in result.GetProperty("capabilities").EnumerateArray())
             context.Output.WriteLine($"{capability.GetProperty("method").GetString(),-24} {capability.GetProperty("version").GetInt32(),-8} {capability.GetProperty("description").GetString()}");
     }
 }

@@ -1,7 +1,9 @@
 # Mainframe plan
 
-Status: approved v1 design, with the initial Windows-local kernel milestone
-implemented. The complete v1 runtime remains a target; see current scope below.
+Status: approved v1 design, with the Windows-local kernel, program execution, and
+interactive shell milestones implemented. The complete distributed v1 runtime
+remains a target; see the verified scope below. The next milestone is planned
+Windows-local password-unlocked encrypted volumes; no storage runtime is implemented yet.
 
 ## Vision
 
@@ -19,33 +21,77 @@ connections. A single-node installation uses the same contracts and routing mode
 
 ## Current implementation
 
-- .NET 10 CLI project with command registration and help routing.
-- `mf help`, `mf version`, local `mf cluster init`, and live `status`, `health`, and
-  `capabilities` queries, including structured JSON output and endpoint/state options.
-- Structured exit codes and separate stdout/stderr output.
-- Local .NET tool packaging, MIT license metadata, and Git ignore rules.
-- `mfd serve`: loopback-only TCP/TLS 1.3 host with local operator mTLS.
-- Private local CA/leaf certificates, stable identity, SQLite WAL/FULL metadata,
-  schema checks, revocation checks, and a consistent metadata backup API.
-- Strict bounded framing/JSON, unary RPC, deadlines, heartbeat, and explicit
-  `kernel.describe`, `kernel.health`, and `kernel.capabilities` handlers.
+Verified on this Windows machine on 2026-09-25:
 
-This milestone runs as the current Windows account with private state. Dedicated
-service-account installation, network invitations/certificate renewal, delegated
-resource grants, peers, process execution/PTYs, storage, jobs, and Windows mounts
-are not implemented. Initial certificates last seven days; expiry fails explicitly.
-The host accepts local terminal clients only and rejects future stream/peer roles.
-Full v1 commands and contracts below remain targets, not available APIs. Linux
-verification is deferred to the user's second machine.
-Support Windows/Linux and public endpoints, trusted users/programs, one persistent
-coordinator, full terminal sessions, both storage providers, and registered local
-programs. No automatic failover, executable deployment, hostile-code sandbox,
-interactive session reattachment, or Orleans is included in v1.
+- .NET 10 projects, MIT licensing, Git ignore rules, modular CLI commands, and local
+  tool packaging. `mframe status`, `health`, and `capabilities` query the running host.
+- `mframed serve` on IPv4 loopback with TLS 1.3, operator mTLS, private CA and leaf keys,
+  stable mainframe/kernel identity, and exclusive state ownership.
+- SQLite WAL/FULL metadata with transactional schema 1-to-2 migration, revocation,
+  grants, program revisions, host roots, execution records, and metadata backups.
+- `mframe cluster renew` with the host stopped: renews unexpired, authorized certificates
+  during their final 24 hours and preserves identity. Protected staging and a journal
+  recover interrupted publication before the next host starts. Expired/revoked
+  identities are rejected; network reenrollment is still pending.
+- Administrator program registration/list/removal with versioned manifests,
+  explicit executable/interpreter paths, compatibility reporting, unambiguous
+  resolution, environment allowlists, and frozen registration revisions.
+- Multiplexed RPC and streaming with reserved receive capacity, fair DATA scheduling,
+  prioritized control frames, bounded credit, EOF/COMPLETE ordering, cancellation,
+  heartbeat, ten-second connection drain, and bounded completed-exchange records.
+- Windows native process launch with explicit inherited handles and Job Object
+  membership established before execution. Pipe mode preserves separate byte-exact
+  stdout/stderr; `mframe exec` preserves child arguments and returns the child exit code.
+- Real Windows ConPTY sessions through `mframe exec --terminal` and `mframe connect`, with
+  input, resize, Ctrl+C, Windows console EOF conventions, and console-mode restoration.
+- Kernel-owned shell sessions and parsing for quoted arguments, `help`, `programs`,
+  `pwd`, `cd`, and `exit`. Pipelines, expansion, redirection, and implicit OS-shell
+  evaluation are not supported.
+- Administrator-approved `/host/<name>` roots for shell working-directory navigation.
+  Named roots are checked against operator grants and program manifests, and reparse
+  points are rejected. They are not filesystem providers or shared mounts.
+- `Mainframe.Sdk`: single-use, 30-second inherited-pipe bootstrap, trusted CA delivery,
+  separate program TCP/TLS sessions, and typed kernel queries. Effective permissions
+  are the intersection of operator grants and the frozen manifest. Local execution
+  authorization lasts 60 seconds, renews while authorized, and cannot revive after
+  expiry. Peer-signed delegation remains pending.
+- Foreground cleanup on detected session loss, cancellation, or authorization loss;
+  at most two seconds for graceful termination before terminating the Job Object.
+  Unfinished records become `outcome_unknown` on restart, without automatic retry.
+
+Validation: `dotnet test Mainframe.slnx -c Release` passed **113 tests**. Final
+streaming/disposal checks passed **10 targeted tests**. Release build completed
+with zero warnings/errors, and CLI tool packaging succeeded. Tests exercise real
+Windows processes, TLS, ConPTY input/resize/Ctrl+C/EOF, exact argv and stream bytes,
+SDK scope/replay/expiry, lease expiry, grant removal, root navigation, frozen
+revisions, process-tree cleanup, migrations, renewal recovery, backpressure,
+protocol violations, and golden wire fixtures. The actual CLI shell acceptance
+navigates `/host/workspace`, runs the standalone Mainframe.Hello SDK example, returns to the prompt,
+and restores console modes on exit. Fixtures use synthetic data only.
+
+This remains a local development host running as the current Windows account.
+The initial operator has a persisted wildcard grant; launched programs are trusted
+host processes, not sandboxed code. A dedicated service-account installer,
+multi-user grant administration, network invitations/automatic certificate renewal,
+public endpoint hardening, peers, Linux PTYs, filesystem providers, background jobs,
+and Windows filesystem export remain pending. No public listener or firewall rule
+is installed. Linux support is not claimed until tested on the second machine.
+
+Local limits: 32 connections, eight TLS handshakes, 64 foreground processes,
+16 shells per connection, 128 programs and host roots, and 4 KiB serialized
+manifests. Wire limits and the 4,096 lifetime exchange-record bound are specified
+in [packets.md](packets.md). Ordinary CLI RPC and launch acceptance deadlines are
+ten seconds; accepted program runtime has no implicit ten-second timeout.
+
+The remaining v1 target includes Windows/Linux and public endpoints, trusted
+users/programs, one persistent coordinator, full terminal sessions, both storage
+providers, and registered installed programs. Automatic failover, deployment,
+hostile-code sandboxing, interactive reattachment, and Orleans remain outside v1.
 
 ## Layers and project boundaries
 
 ```text
-mf terminal client -- TCP/TLS --> Host-side shell and process execution
+mframe terminal client -- TCP/TLS --> Host-side shell and process execution
                                        |
                               Ordinary program process
                                        |
@@ -56,15 +102,16 @@ Windows filesystem adapter --> Kernel API and syscall dispatcher
                         Local handler          Remote kernel
 ```
 
-Proposed projects:
+Current and proposed projects:
 
 | Project | Responsibility |
 | --- | --- |
 | Mainframe.Cli | Local connection options, terminal I/O, one-shot execution |
-| Mainframe.Contracts | Versioned requests, responses, resource IDs, errors |
+| Mainframe.Protocol | Versioned wire contracts, framing, streaming, and errors |
 | Mainframe.Core | Dispatch, namespace, authorization, module contracts |
-| Mainframe.Host | Persistent kernel (`mfd`), host-side shell, process supervision, endpoints |
+| Mainframe.Host | Persistent kernel (`mframed`), host-side shell, process supervision, endpoints |
 | Mainframe.Client | .NET session/RPC client, authentication, streaming |
+| Mainframe.Sdk | Process bootstrap and typed program kernel calls |
 | Future adapter project | Windows filesystem integration |
 
 The planned CLI is a thin remote terminal. The host-side shell parses mainframe
@@ -82,16 +129,16 @@ design. The client selects an endpoint; it need not know the cluster topology.
 Proposed interaction:
 
 ```text
-mf connect server:7443
+mframe --endpoint server:7443 connect
 atlas> weather
 atlas> bank
 atlas> cat /vol/documents/report.txt
 
 # One-shot execution from the host OS shell:
-mf --endpoint server:7443 exec cat /vol/documents/report.txt
+mframe --endpoint server:7443 exec cat /vol/documents/report.txt
 ```
 
-`mf connect` opens an interactive remote shell. The mainframe shell owns the
+`mframe connect` opens an interactive remote shell. The mainframe shell owns the
 logical working directory, environment, and command registry. One-shot execution
 forwards arguments, streams, and the program's exit code. The shell supports quoted
 arguments, logical working-directory changes, and registered commands. Pipelines,
@@ -172,7 +219,7 @@ the same semantics as a persistent file.
 
 See [packets.md](packets.md) for the selected 20-byte frame header, message types,
 TLS handshake, RPC lifecycle, process/file streams, flow control, and peer relay.
-It specifies the v1 target and identifies the implemented unary subset separately.
+It specifies the v1 target and identifies the implemented Windows-local execution subset separately.
 
 Use explicit addresses on private or public networks and persistent authenticated
 TCP/TLS 1.3 connections, including loopback. Implement custom framed RPC using
@@ -298,8 +345,8 @@ The dispatcher selects a local handler or remote connection. Open file handles
 retain owning node, session identity, and execution generation. Define close, timeout, and node-restart
 behavior so stale handles cannot accidentally reference new resources.
 
-Administrative commands expose physical topology: `mf nodes`, `mf node inspect`,
-`mf volume inspect`, and `mf job inspect`. One logical machine should not hide
+Administrative commands expose physical topology: `mframe nodes`, `mframe node inspect`,
+`mframe volume inspect`, and `mframe job inspect`. One logical machine should not hide
 failures or make diagnosis difficult.
 
 ### Two-machine example
@@ -369,7 +416,8 @@ atlas> export / --drive M:
 atlas> export /vol/archive --directory C:\Mainframe\Archive
 ```
 
-Start with one authoritative owner per volume and remote access from other nodes.
+Start with one authoritative local owner per volume. Remote access follows in the
+linked-kernel milestone; it is not required for initial encrypted storage.
 If the owner disconnects, report the volume as unavailable. A shared namespace
 does not imply replicated storage. Later replication policies must specify which
 copies acknowledge a write, when success means durable storage, and how recovery
@@ -377,12 +425,14 @@ and degraded operation work. Do not silently downgrade durability.
 
 ### Providers and names
 
-Implement both providers in the initial storage milestone:
+Implement encrypted managed volumes first, locally on Windows:
 
-- Managed volume: one local SQLite database per volume with directories, metadata,
-  and 64 KiB file-content chunks. Target documents and ordinary files first.
-- Host-directory volume: an administrator-selected existing directory exposed
-  through the same filesystem API.
+- Managed volume: one password-unlocked SQLCipher container (`.mfv`) per volume,
+  with encrypted directories, metadata, and 64 KiB file-content chunks. Mount it
+  under `/vol/<name>`. See the detailed next-milestone plan below.
+- Host-directory volume: a later v1 provider exposing an administrator-selected
+  existing directory through the same filesystem API. It is outside the next
+  milestone; current `/host` navigation does not implement this provider.
 
 Paths use `/`. Normalize managed names to Unicode NFC, preserve spelling, and
 compare server-side with ordinal case-insensitive comparison. Reject Windows-
@@ -419,6 +469,212 @@ Host-directory consistency is limited by direct external modification. Mainframe
 locks coordinate its clients, not arbitrary host applications. Detect changed or
 vanished resources and report errors. Future filesystem adapters must respect
 these provider limits rather than claim stronger semantics.
+
+## Next milestone: local encrypted volumes
+
+Status: planned, not implemented. This supersedes the previous requirement to ship
+both storage providers together. Build and accept the first provider on this Windows
+machine before Linux, peers, host-directory providers, or WinFsp.
+
+### Container and encryption decisions
+
+Use SQLCipher Community Edition through a compatible native SQLite binding. Keep
+`Microsoft.Data.Sqlite` where the binding supports it; do not implement a custom
+cipher or filesystem journal. The first task pins a supported release, crypto
+backend, native Windows x64 binary/build recipe, and redistribution notices.
+Verify that native dependency resolution cannot silently select ordinary SQLite.
+If a suitable distribution cannot be validated, report that blocker rather than
+substitute plaintext storage. Test the existing coordinator database with the
+selected binding; volume encryption must not change its identity or schema.
+
+A `.mfv` file is an encrypted SQLite database containing a volume UUID, numbered
+format/schema version, directory entries, timestamps, lengths, and 64 KiB content
+chunks. Filenames and file metadata are encrypted as well as content. Use the
+selected stable SQLCipher release's authenticated page encryption and password
+KDF defaults, pinned as a documented format profile. No plaintext SQLite header,
+custom password hashing, automatic legacy-format probing, or plaintext fallback.
+Reject unsupported formats; migrations are numbered, transactional, and explicit.
+
+Use WAL, foreign keys, `synchronous=FULL`, and memory-only temporary stores. Verify
+these settings on each connection. Disable connection pooling for keyed databases
+so unmount closes every keyed connection. Data pages in recovery files must also
+be encrypted. WAL/SHM headers and file sizes may expose structural information.
+Container size, host path, mount name, and volume UUID are not secrets.
+
+Allow `.mfv-wal` and `.mfv-shm` while mounted or after a crash. Preserve them for
+recovery; never delete them as a cleanup shortcut. A successful clean unmount
+checkpoints and closes the database, leaving a portable `.mfv` file. If checkpoint
+or flush fails, report it and preserve recovery files. Copying a live `.mfv` alone
+is not a backup. Initially support copying only after successful clean unmount;
+live backup/export tooling is later work. Durability assumes the OS and device
+honor flushes; process-kill tests do not establish power-loss hardware behavior.
+
+### Passwords and mount lifecycle
+
+Proposed administrator commands (not available yet):
+
+```powershell
+mframe volume create E:\Mainframe\Data\documents.mfv
+mframe volume mount E:\Mainframe\Data\documents.mfv /vol/documents
+mframe volume list
+mframe volume unmount /vol/documents
+```
+
+`create` prompts twice, refuses an existing destination, initializes and validates
+a container, closes it cleanly, and leaves it unmounted. Never overwrite existing
+files or publish a partially initialized container as complete. Use protected
+same-directory staging and exclusive publication; interruptions leave an explicit
+recoverable staging artifact, not a mounted volume. Creation RPCs are not replayed.
+
+`mount` prompts once, authenticates the local operator, opens an existing file
+without create-if-missing behavior, verifies its key/schema/integrity, then
+publishes `/vol/<name>` atomically. Mount names are one valid normalized component;
+no nested or overlapping mounts in this milestone. Reserve `/vol` as a virtual
+root. Reject duplicate mount names, duplicate volume UUIDs, and alternate paths to
+an already-open container. Use canonical host-file identity and exclusive ownership
+for the container lifetime; reject network paths and reparse-point paths. Bound
+integrity validation time and fail without exposing a half-mounted namespace.
+
+Read passwords from a masked console prompt, never argv, environment variables,
+terminal process streams, config files, logs, or coordinator metadata. Require a
+usable console for create/mount in this milestone. Creation requires at least 12
+Unicode scalar values; passwords are case-sensitive and never normalized or
+trimmed. Bound UTF-8 encoding to 1,024 bytes. Existing-container unlock checks the
+maximum only, so policy changes do not lock out valid credentials. Passwords travel
+only in sensitive operator RPC payloads over the existing authenticated TLS link;
+programs cannot invoke mount/unlock administration or receive passwords. Redact
+these requests before tracing, exception formatting, or audit logging.
+
+Keep key material only for the unlocked lifetime, minimize password copies, clear
+mutable buffers, and release native keys on close. Managed strings, OS paging, and
+crash dumps prevent a promise of complete memory erasure. Encryption protects data
+at rest; the kernel and trusted host processes can see plaintext while unlocked.
+There is no password recovery, saved key, automatic unlock, password change, or
+rekey operation in this milestone. Tell the operator this when creating a volume.
+
+Persist mount configuration (UUID, path, mount name), never its password. Host
+restart returns configured mounts as `locked`; manual `volume mount` unlocks the
+matching entry. Missing files remain unavailable without being recreated. Explicit
+successful unmount removes the configured mount, not the container or grants.
+Unmount rejects new opens while draining, returns `VOLUME_BUSY` if handles or I/O
+are active, and does not silently invalidate them. No force-unmount command yet.
+A mounted volume outlives the operator connection that unlocked it. Ownership is
+local; no discovery, replication, or remote delegation is needed yet.
+
+### Filesystem and SDK contracts
+
+Add a storage project with a provider interface and an encrypted implementation;
+keep namespace resolution and authorization in the kernel. Extend protocol contracts,
+source-generated JSON, client APIs, SDK, and capability discovery together.
+
+- Administration: `volume.create`, `volume.mount`, `volume.list`, `volume.unmount`.
+- Metadata: `fs.list`, `fs.stat`, `fs.mkdir`, `fs.delete`, `fs.rename`.
+- Handles: `fs.open`, `fs.read`, `fs.write`, `fs.truncate`, `fs.flush`, `fs.close`.
+- SDK: async directory/file APIs and a seekable `Stream` adapter using explicit
+  offsets, with async disposal, cancellation, and no mutation retries. Serialize
+  operations that change a stream's position. Limit lengths/offsets to nonnegative
+  signed 64-bit values and check overflow. Seeking past EOF is allowed; subsequent
+  writes/truncation extend with zero-filled logical gaps without allocating all
+  intervening chunks. Read beyond EOF returns zero bytes.
+
+The existing naming policy still applies. Resolve NFC names using a registered
+server-side ordinal-ignore-case SQLite collation, not SQLite's ASCII-only NOCASE.
+Enforce uniqueness transactionally. Reject traversal above `/vol`, Windows-reserved
+names, invalid characters, trailing dots/spaces, and case collisions. Do not store
+symlinks, hard links, alternate data streams, or executable host paths in volumes.
+Programs continue launching from existing host working directories; virtual paths
+are SDK arguments, not OS working directories. `/host` shell navigation is unchanged.
+
+Issue opaque handles bound to connection, execution/operator, volume ID, and mount
+and host generations. Validate read/write access and sharing flags on every call.
+Close handles on connection/execution loss or lease expiry. Separate SDK connections
+cannot transfer handles. The process cannot use a handle to widen its permissions.
+Require `volume.manage` for operator administration; programs are always excluded
+from these methods. Filesystem grants use `volume:<uuid>:read` and
+`volume:<uuid>:write`, intersected with the frozen manifest and current operator
+grants. Reads/list/stat require read; mutation requires write; mixed access requires
+both. Check lease/grant validity at dispatch and immediately before write commit.
+Extend manifest validation to these resource scopes; an `fs.*` method name alone
+must not authorize every volume. Preserve existing wildcard operator behavior.
+
+### Atomicity, bounds, and errors
+
+Use one serialized operation queue per volume. Buffer a complete bounded write
+before beginning its transaction; never keep a write transaction waiting for the
+network. Each write accepts at most 64 KiB and commits data, length, and timestamps
+together. SDK larger writes split into requests. Earlier committed requests remain
+if a later request fails. Cancellation before commit rolls back; cancellation or
+connection loss racing a commit may produce an unknown outcome. Never retry it.
+
+Open supports existing/create-new/open-or-create/truncate modes, access, and explicit
+read/write/delete sharing flags. Creating with create-new fails if the name exists.
+Publishing a complete file uses a caller-chosen temporary name with create-new,
+bounded writes, flush, and atomic same-volume rename with explicit replace control.
+Check sharing restrictions for source and destination. Crash before publication
+leaves the old target and possibly a temporary file; crash after commit leaves the
+new target. Never infer abandoned files solely from their names. Delete requires
+no conflicting handles; directory deletion is empty-only. Reclaim unreachable chunks
+in bounded transactions without exposing deleted contents through reused entries.
+
+Managed mutations acknowledge after FULL commit; `fs.flush` confirms prior writes
+and reports underlying errors, without promising a checkpoint or backup-ready file.
+Close does not replace flush. Enumeration is bounded and may observe changes between
+batches; it is not a snapshot. Byte-range locks and cross-volume rename return
+`NOT_SUPPORTED`. Preserve the 16 MiB connection transport budget and reserve read/
+write buffers within it rather than introducing an unbounded storage queue.
+
+Initial configurable caps: 32 mounted volumes, 256 handles per connection, 1,024
+handles per host, 256 entries per enumeration batch, and 64 queued operations per
+volume. Bound enumeration responses by the existing frame limit, even below 256
+entries. Permit two concurrent password/KDF operations per host; throttle failed
+unlocks per operator (five per minute) and globally (twenty per minute). Reject
+excess work with a retryable busy error, without retaining password-bearing queues.
+
+Specify stable errors for locked/unavailable/busy volumes, authentication failure,
+access denied, sharing violations, missing/existing entries, invalid paths, invalid
+handles, disk full, corruption, unsupported format, and I/O failure. Wrong passwords
+and unreadable encrypted headers return a generic unlock failure, not a guessed
+password-versus-corruption diagnosis. Acknowledged durability, transport failure,
+and unknown mutation outcomes remain distinct.
+
+### Implementation sequence and acceptance
+
+1. Validate and pin the SQLCipher binding/native package and license notices. Prove
+   encrypted main/WAL data, memory-only temp storage, rejection by plain SQLite,
+   wrong-password failure, and coexistence with existing metadata databases.
+2. Implement the versioned container schema, local ownership, create/mount/unmount,
+   locked restart records, prompts, throttling, redaction, and mount permissions.
+3. Implement names, chunks, transactions, handle/sharing tables, bounds, cleanup,
+   durability errors, and atomic publication; test the provider without transport.
+4. Add the versioned storage RPCs and SDK stream APIs using existing flow control.
+   Add schemas and golden transcripts, including commit/COMPLETE cancellation races.
+5. Add standalone SDK examples `Mainframe.Ls`, `Mainframe.Cat`, and
+   `Mainframe.StorageDemo`; register them explicitly with volume-scoped permissions.
+   Keep their entry points as `Program.Main` and apply the repository editorconfig.
+6. Run isolated Windows acceptance and document actual results before marking done.
+
+Acceptance creates and mounts a password-protected volume, writes nested files
+through the SDK, verifies binary-exact reads through `cat`, enumerates with `ls`,
+cleanly unmounts, remounts, and compares content and metadata. Test default/empty
+files, seek/truncate/zero gaps, case collisions, traversal, sharing conflicts,
+permissions, lease expiry, disconnected clients, memory bounds, and stale handles.
+
+Use deterministic failure injection and real child-host termination before/during/
+after commits, rename publication, checkpoint, and initial creation. On restart,
+volumes are locked. Correct-password mounting recovers acknowledged commits and
+never exposes torn bounded writes. Simulate disk-full and flush failures, corrupt
+pages, missing recovery files, duplicate UUIDs, competing owners, and unsupported
+schemas. Validate copy-after-clean-unmount on a new local state directory, with
+fresh explicit grants. Search artifacts/logs for known content, filename, and
+password sentinels; this complements native encryption checks, not a cryptographic
+proof. Keep all existing execution/identity/protocol tests passing. No Linux or
+WinFsp acceptance claim is part of this work.
+
+Implementation references: [SQLCipher design](https://www.zetetic.net/sqlcipher/design/),
+[SQLCipher licensing](https://www.zetetic.net/sqlcipher/license/), and
+[Microsoft.Data.Sqlite encryption](https://learn.microsoft.com/en-us/dotnet/standard/data/sqlite/encryption).
+The selected native distribution and its dependencies need their own retained
+notices; Mainframe remains MIT. No encryption dependency has been added by this plan.
 
 ## Coordination and failures
 
@@ -519,33 +775,41 @@ content. Select the adapter based on the required filesystem semantics.
 
 Introduce typed clients for identity/capabilities, shell sessions, process execution,
 file handles/streams, program registration, and enrollment. Keep syscall contracts
-independent of presentation and storage implementation. Only the CLI foundation is
-implemented along with the Windows-local unary kernel subset; later stages remain
-pending and require their own implementation/testing.
+independent of presentation and storage implementation. The CLI, local kernel,
+Windows execution, SDK, and interactive shell are implemented. Linux and distributed
+behavior require their own implementation and acceptance tests.
 
 1. **CLI foundation (implemented).** Keep commands modular; extend the argument
    contract as real operations are introduced.
 2. **Protocol, identity, and coordinator (local subset implemented).** Framing,
-   TLS 1.3, local bootstrap/operator authorization, SQLite identity metadata, and
-   unary queries exist. Network enrollment/renewal, delegated grants, public
-   hardening, and complete coordinator metadata remain pending.
-3. **Program SDK and terminal execution.** Implement scoped bootstrap, pipe-mode
-   execution, Windows ConPTY/Linux PTYs, cancellation, and terminal restoration.
-4. **Two linked kernels.** Establish authenticated peers, exchange manifests, and
+   multiplexing/flow control, TLS 1.3, local operator authorization and stopped-host
+   renewal, SQLite migrations, registrations, grants, and execution records exist.
+   Next complete network enrollment/renewal, multi-user administration, signed
+   delegation, public hardening, and distributed coordinator metadata.
+3. **Program SDK and terminal execution (Windows implemented).** Scoped bootstrap,
+   pipe execution, Windows ConPTY, Job Objects, cancellation, terminal restoration,
+   registered programs, host-root navigation, and the kernel-owned shell are tested.
+   Next implement the Linux launch/process-group/PTY adapters and validate on the
+   second machine. Keep the same wire, SDK, and manifest contracts.
+4. **Local encrypted storage (next, planned).** Complete the implementation and
+   acceptance sequence in [the encrypted-volume plan](#next-milestone-local-encrypted-volumes).
+   Password-unlocked containers, local `/vol` mounts, SDK file access, and crash-safe
+   writes come before peers. Host-directory providers and WinFsp are excluded.
+5. **Two linked kernels.** Establish authenticated peers, exchange manifests, and
    route a remote read-only syscall. Both CLIs show the same mainframe identity and
    both nodes. Verify incompatible versions, unauthorized peers, disconnection,
    deadlines, and reconnection without stale registry entries. Register programs
    per host and relay a remote process's I/O through either entry kernel.
-5. **Both storage providers and shared namespace.** Implement managed SQLite and
-   host-directory volumes, internal mounts, handle routing, and durability contracts.
+6. **Storage expansion and shared namespace.** Add the host-directory provider
+   alongside encrypted managed volumes, remote handle routing, and owner availability.
    Read/write through either node. Verify permissions,
    concurrent access, owner loss, and stale handles. Complete the two-machine
    weather/bank/cat fixture scenario, including `cat` on A reading storage on B.
-6. **Distributed jobs.** Add durable submission, placement, logs, cancellation,
+7. **Distributed jobs.** Add durable submission, placement, logs, cancellation,
    and explicit failure/retry rules. Verify ambiguous outcomes and worker loss.
-7. **Windows export (separate adapter milestone).** Implement the selected adapter against the same client API.
+8. **Windows export (separate adapter milestone).** Implement the selected adapter against the same client API.
    Verify normal editor workflows and that CLI and Windows see the same data.
-8. **Later work, outside v1.** Replication, coordinator failover, snapshots, program
+9. **Later work, outside v1.** Replication, coordinator failover, snapshots, program
    deployment, hostile-code sandboxing, QUIC, session reattachment, and advanced
    operator tools require separate plans and failure tests.
 
@@ -559,7 +823,7 @@ pending and require their own implementation/testing.
 | Permissions | Resource grants intersected with program manifest permissions |
 | Coordination | One persistent coordinator; bounded lease-based outage behavior |
 | Metadata | Local SQLite WAL/FULL; transactional migrations and backups |
-| Storage | Both managed chunked SQLite and host-directory providers |
+| Storage | Local password-unlocked SQLCipher containers first; host-directory and remote access later in v1 |
 | Names | NFC, case-preserving/case-insensitive, Windows-friendly names |
 | Execution | Trusted local executables/interpreters; no sandbox claim |
 | Registration | Admin manifests; ambiguous names require version/node qualification |
@@ -575,7 +839,9 @@ pending and require their own implementation/testing.
   denied delegation, public-endpoint throttling, and bootstrap expiry/reuse.
 - Coordinator: restart persistence, transactional enrollment, backup/restore,
   schema rejection, outage blocking, lease expiry, and recovery reconciliation.
-- Storage: cross-node I/O, naming collisions, traversal/link rejection, sharing
+- Local encrypted storage: wrong passwords, encrypted recovery files, locked restart,
+  bounded SDK I/O, atomic publication, and crash recovery as specified below.
+- Later storage: cross-node I/O, naming collisions, traversal/link rejection, sharing
   modes, partial writes, flush, atomic replacement, stale handles, and crash recovery.
 - Execution: exact arguments, ambiguity, qualified names, scoped credentials,
   exit codes, cancellation, and interrupted-job recovery.

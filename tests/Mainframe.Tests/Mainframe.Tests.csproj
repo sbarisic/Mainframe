@@ -8,6 +8,8 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../../examples/Mainframe.Hello/Mainframe.Hello.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../Mainframe.Fixtures/Mainframe.Fixtures.csproj" ReferenceOutputAssembly="false" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" PrivateAssets="all" />
@@ -18,5 +20,8 @@
   <ItemGroup><Using Include="Xunit" /></ItemGroup>
   <ItemGroup>
     <None Include="../../docs/protocol/hello-v1.hex" Link="Fixtures/hello-v1.hex" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../docs/protocol/window-update-v1.hex" Link="Fixtures/window-update-v1.hex" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../docs/protocol/process-start-v1.hex" Link="Fixtures/process-start-v1.hex" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../docs/protocol/complete-v1.hex" Link="Fixtures/complete-v1.hex" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

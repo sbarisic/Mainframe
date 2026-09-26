@@ -19,11 +19,14 @@ public enum FrameType : ushort
 }
 
 public sealed record Frame(FrameType Type, ulong ExchangeId, uint ChannelId, byte[] Payload);
-
 public readonly record struct FrameHeader(int PayloadLength, FrameType Type, ulong ExchangeId, uint ChannelId);
-
 public sealed class ProtocolException : IOException
 {
-    public ProtocolException(string message) : base(message) { }
-    public ProtocolException(string message, Exception innerException) : base(message, innerException) { }
+    public ProtocolException(string message) : base(message)
+    {
+    }
+
+    public ProtocolException(string message, Exception innerException) : base(message, innerException)
+    {
+    }
 }

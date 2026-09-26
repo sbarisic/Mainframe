@@ -7,6 +7,7 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../Mainframe.Protocol/Mainframe.Protocol.csproj" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
     <None Include="../../LICENSE" Link="LICENSE" Pack="true" PackagePath="" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>

@@ -10,7 +10,6 @@ using Mainframe.Core;
 using Mainframe.Protocol;
 
 namespace Mainframe.Host;
-
 /// <summary>Loopback-only authenticated unary kernel host. It does not enable public or peer access.</summary>
 public sealed class KernelServer : IAsyncDisposable
 {
@@ -28,18 +27,39 @@ public sealed class KernelServer : IAsyncDisposable
     private long nextConnection;
     private KernelDispatcher? dispatcher;
     private bool disposed;
-
-    public KernelServer(KernelStore store, int port = 7443, Action<string>? log = null)
+    private readonly FileStream ownership;
+    private readonly ExecutionService execution;
+    private readonly ConcurrentDictionary<long, WireConnection> wires = new();
+    public KernelServer(KernelStore store, int port = 7443, Action<string>? log = null, TimeProvider? timeProvider = null)
     {
-        if (port is < 0 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
+        if (port is < 0 or > 65535)
+            throw new ArgumentOutOfRangeException(nameof(port));
         this.store = store;
-        this.log = log ?? (_ => { });
+        this.log = log ?? (_ =>
+        {
+        });
         listener = new TcpListener(IPAddress.Loopback, port);
         listener.Server.ExclusiveAddressUse = true;
-        serverCertificate = store.LoadServerCertificate();
-        caCertificate = store.LoadCaCertificate();
-        if (!CertificateTrust.Validate(serverCertificate, caCertificate, CertificateTrust.ServerAuthentication))
-            throw new AuthenticationException("Kernel certificate is invalid or expired.");
+        ownership = store.AcquireHostOwnership();
+        X509Certificate2? loadedServer = null, loadedCa = null;
+        try
+        {
+            store.RecoverExecutions();
+            execution = new ExecutionService(store, () => Port, this.log, timeProvider ?? TimeProvider.System);
+            loadedServer = store.LoadServerCertificate();
+            loadedCa = store.LoadCaCertificate();
+            if (!CertificateTrust.Validate(loadedServer, loadedCa, CertificateTrust.ServerAuthentication))
+                throw new AuthenticationException("Kernel certificate is invalid or expired.");
+            serverCertificate = loadedServer;
+            caCertificate = loadedCa;
+        }
+        catch
+        {
+            loadedServer?.Dispose();
+            loadedCa?.Dispose();
+            ownership.Dispose();
+            throw;
+        }
     }
 
     public int Port => ((IPEndPoint)listener.LocalEndpoint).Port;
@@ -48,7 +68,8 @@ public sealed class KernelServer : IAsyncDisposable
     public void Start()
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        if (acceptLoop is not null) throw new InvalidOperationException("Kernel already started.");
+        if (acceptLoop is not null)
+            throw new InvalidOperationException("Kernel already started.");
         listener.Start(32);
         dispatcher = new KernelDispatcher(store.Identity, DateTimeOffset.UtcNow, () => ActiveConnections);
         acceptLoop = AcceptAsync();
@@ -60,24 +81,42 @@ public sealed class KernelServer : IAsyncDisposable
         {
             while (!stopping.IsCancellationRequested)
             {
-                var client = await listener.AcceptTcpClientAsync(stopping.Token);
-                if (!connectionSlots.Wait(0)) { client.Dispose(); continue; }
+                TcpClient client = await listener.AcceptTcpClientAsync(stopping.Token);
+                if (!connectionSlots.Wait(0))
+                {
+                    client.Dispose();
+                    continue;
+                }
+
                 client.NoDelay = true;
                 long id = Interlocked.Increment(ref nextConnection);
                 clients[id] = client;
-                var task = HandleAsync(client, stopping.Token);
+                Task task = HandleAsync(client, stopping.Token);
                 connections[id] = task;
                 _ = RemoveWhenCompleteAsync(id, task);
             }
         }
-        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
-        catch (SocketException) when (stopping.IsCancellationRequested) { }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+        {
+        }
+        catch (SocketException) when (stopping.IsCancellationRequested || disposed)
+        {
+        }
+        catch (ObjectDisposedException) when (disposed)
+        {
+        }
     }
 
     private async Task RemoveWhenCompleteAsync(long id, Task task)
     {
-        try { await task; }
-        catch (Exception ex) { log($"Connection handler failed ({ex.GetType().Name})."); }
+        try
+        {
+            await task;
+        }
+        catch (Exception ex)
+        {
+            log($"Connection handler failed ({ex.GetType().Name}).");
+        }
         finally
         {
             connections.TryRemove(id, out _);
@@ -91,181 +130,116 @@ public sealed class KernelServer : IAsyncDisposable
         using (client)
         using (var ssl = new SslStream(client.GetStream(), false, (_, cert, _, _) =>
         {
-            if (cert is null) return false;
+            if (cert is null)
+                return true; // Restricted bootstrap only; operational dispatch remains unauthenticated.
             using var presented = new X509Certificate2(cert);
-            return CertificateTrust.Validate(presented, caCertificate, CertificateTrust.ClientAuthentication)
-                && store.IsOperatorAuthorized(presented);
+            return CertificateTrust.Validate(presented, caCertificate, CertificateTrust.ClientAuthentication) && store.IsOperatorAuthorized(presented);
         }))
         {
             try
             {
-                if (!handshakeSlots.Wait(0)) return;
+                if (!handshakeSlots.Wait(0))
+                    return;
                 try
                 {
                     using var handshake = CancellationTokenSource.CreateLinkedTokenSource(stop);
                     handshake.CancelAfter(TimeSpan.FromSeconds(10));
-                    await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
-                    {
-                        ServerCertificate = serverCertificate,
-                        ClientCertificateRequired = true,
-                        EnabledSslProtocols = SslProtocols.Tls13,
-                        CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
-                        AllowRenegotiation = false
-                    }, handshake.Token);
+                    await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = serverCertificate, ClientCertificateRequired = true, EnabledSslProtocols = SslProtocols.Tls13, CertificateRevocationCheckMode = X509RevocationMode.NoCheck, AllowRenegotiation = false }, handshake.Token);
                 }
-                finally { handshakeSlots.Release(); }
-
-                using var remote = ssl.RemoteCertificate is null ? null : new X509Certificate2(ssl.RemoteCertificate);
-                if (remote is null || !store.IsOperatorAuthorized(remote)) return;
-                int maxPayload;
-                using (var handshake = CancellationTokenSource.CreateLinkedTokenSource(stop))
+                finally
                 {
-                    handshake.CancelAfter(TimeSpan.FromSeconds(10));
-                    var first = await FrameCodec.ReadAsync(ssl, handshake.Token);
-                    if (first is null || first.Type != FrameType.Hello)
-                        throw new ProtocolException("HELLO required.");
-                    var hello = ProtocolJson.Deserialize<HelloRequest>(first.Payload);
-                    if (!hello.Versions.Contains(1) || hello.Role != "terminal" ||
-                        hello.RequiredFeatures.Any(f => f != "unary-rpc") ||
-                        !hello.RequiredFeatures.Concat(hello.OptionalFeatures).Contains("unary-rpc", StringComparer.Ordinal) ||
-                        hello.MaxFrameBytes is < 1024 or > FrameCodec.MaxPayloadBytes)
-                    {
-                        await SendAsync(ssl, new Frame(FrameType.GoAway, 0, 0,
-                            ProtocolJson.Serialize(new GoAwayMessage("Unsupported version, role, feature, or frame limit."))), handshake.Token);
-                        return;
-                    }
-                    maxPayload = hello.MaxFrameBytes;
-                    await SendAsync(ssl, new Frame(FrameType.Welcome, 0, 0,
-                        ProtocolJson.Serialize(new WelcomeResponse(1, ["unary-rpc"], store.Identity.KernelId,
-                            store.Identity.MainframeId, maxPayload, "authenticated"))), handshake.Token);
-                }
-                await ServeUnaryAsync(ssl, remote, maxPayload, stop);
-            }
-            catch (Exception ex) when (ex is AuthenticationException or IOException or OperationCanceledException
-                or SocketException or System.Text.Json.JsonException or CryptographicException
-                or Microsoft.Data.Sqlite.SqliteException or UnauthorizedAccessException)
-            {
-                // Never echo peer-supplied payloads, credentials, or certificate contents.
-                if (!stop.IsCancellationRequested)
-                    log(ex is AuthenticationException
-                        ? $"TLS authentication failed: {ex.Message}"
-                        : $"Connection ended ({ex.GetType().Name}).");
-            }
-        }
-    }
-
-    private async Task ServeUnaryAsync(SslStream ssl, X509Certificate2 remote, int maxPayload, CancellationToken stop)
-    {
-        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(stop);
-        var timer = Stopwatch.StartNew();
-        Task<Frame?>? pending = null;
-        byte[]? ping = null;
-        ulong lastRequest = 0;
-        int exchanges = 0;
-        var acceptedExchanges = new HashSet<ulong>();
-        try
-        {
-            while (!stop.IsCancellationRequested)
-            {
-                pending ??= FrameCodec.ReadAsync(ssl, maxPayload, lifetime.Token).AsTask();
-                using var tickCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-                var tick = Task.Delay(TimeSpan.FromSeconds(10), tickCancellation.Token);
-                var completed = await Task.WhenAny(pending, tick);
-                await tickCancellation.CancelAsync();
-                if (completed != pending)
-                {
-                    stop.ThrowIfCancellationRequested();
-                    if (!store.IsOperatorAuthorized(remote) || timer.Elapsed >= TimeSpan.FromSeconds(30)) return;
-                    if (ping is null)
-                    {
-                        ping = RandomNumberGenerator.GetBytes(8);
-                        await SendAsync(ssl, new Frame(FrameType.Ping, 0, 0, ping), stop);
-                    }
-                    continue;
+                    handshakeSlots.Release();
                 }
 
-                var frame = await pending;
-                long receivedAt = Stopwatch.GetTimestamp();
-                pending = null;
-                if (frame is null) return;
-                if (!store.IsOperatorAuthorized(remote))
+                using X509Certificate2? remote = ssl.RemoteCertificate is null ? null : new X509Certificate2(ssl.RemoteCertificate);
+                using var application = CancellationTokenSource.CreateLinkedTokenSource(stop);
+                application.CancelAfter(TimeSpan.FromSeconds(10));
+                Frame? first = await FrameCodec.ReadAsync(ssl, application.Token);
+                if (first is null || first.Type != FrameType.Hello)
+                    throw new ProtocolException("HELLO required.");
+                HelloRequest hello = ProtocolJson.Deserialize<HelloRequest>(first.Payload);
+                if (!hello.Versions.Contains(1) || hello.Role is not ("terminal" or "program") || hello.RequiredFeatures.Any(f => !ExecutionFeatures.All.Contains(f)) || !hello.RequiredFeatures.Concat(hello.OptionalFeatures).Contains("unary-rpc") || hello.MaxFrameBytes < 1024)
                 {
-                    await SendAsync(ssl, new Frame(FrameType.GoAway, 0, 0,
-                        ProtocolJson.Serialize(new GoAwayMessage("Identity revoked or expired."))), stop);
+                    await FrameCodec.WriteAsync(ssl, new(FrameType.GoAway, 0, 0, ProtocolJson.Serialize(new GoAwayMessage("Unsupported version, role, or feature."))), application.Token);
                     return;
                 }
-                timer.Restart();
-                switch (frame.Type)
+
+                bool operatorRole = hello.Role == "terminal" && remote is not null && store.IsOperatorAuthorized(remote);
+                if (hello.Role == "terminal" && !operatorRole)
+                    throw new AuthenticationException("Operator certificate required.");
+                var features = ExecutionFeatures.All.Intersect(hello.RequiredFeatures.Concat(hello.OptionalFeatures)).ToArray();
+                await FrameCodec.WriteAsync(ssl, new(FrameType.Welcome, 0, 0, ProtocolJson.Serialize(new WelcomeResponse(1, features, store.Identity.KernelId, store.Identity.MainframeId, hello.MaxFrameBytes, operatorRole ? "authenticated" : "required"))), application.Token);
+                Func<bool> valid;
+                Func<string, bool> allows;
+                string principal;
+                if (operatorRole)
                 {
-                    case FrameType.Ping:
-                        await SendAsync(ssl, new Frame(FrameType.Pong, 0, 0, frame.Payload), stop);
-                        break;
-                    case FrameType.Pong:
-                        if (ping is null || !frame.Payload.AsSpan().SequenceEqual(ping))
-                            throw new ProtocolException("Unexpected PONG.");
-                        ping = null;
-                        break;
-                    case FrameType.GoAway:
-                        _ = ProtocolJson.Deserialize<GoAwayMessage>(frame.Payload);
-                        return;
-                    case FrameType.Cancel:
-                        if (ProtocolJson.Deserialize<System.Text.Json.JsonElement>(frame.Payload).ValueKind != System.Text.Json.JsonValueKind.Object)
-                            throw new ProtocolException("Cancellation must be a JSON object.");
-                        // Unary handlers are immediate and side-effect-free; their response is already final.
-                        if (!acceptedExchanges.Contains(frame.ExchangeId))
-                            throw new ProtocolException("Unknown exchange.");
-                        break;
-                    case FrameType.Request:
-                        if (frame.ExchangeId % 2 == 0 || frame.ExchangeId <= lastRequest)
-                            throw new ProtocolException("Request IDs must be increasing odd integers.");
-                        lastRequest = frame.ExchangeId;
-                        acceptedExchanges.Add(frame.ExchangeId);
-                        var request = ProtocolJson.Deserialize<RpcRequest>(frame.Payload);
-                        var response = Stopwatch.GetElapsedTime(receivedAt).TotalMilliseconds >= (request.TimeoutMs ?? 10000)
-                            ? KernelDispatcher.Error("DEADLINE_EXCEEDED", "The request deadline elapsed before dispatch.")
-                            : dispatcher!.Dispatch(request);
-                        byte[] payload = ProtocolJson.Serialize(response);
-                        if (payload.Length > maxPayload)
-                            payload = ProtocolJson.Serialize(KernelDispatcher.Error("RESOURCE_EXHAUSTED", "Result exceeds negotiated frame limit."));
-                        await SendAsync(ssl, new Frame(FrameType.Response, frame.ExchangeId, 0, payload), stop);
-                        if (++exchanges >= 4096)
-                        {
-                            await SendAsync(ssl, new Frame(FrameType.GoAway, 0, 0,
-                                ProtocolJson.Serialize(new GoAwayMessage("Unary session exchange limit reached."))), stop);
-                            return;
-                        }
-                        break;
-                    default:
-                        throw new ProtocolException("Frame is not supported in a unary session.");
+                    principal = store.GetOperatorIdentity(remote!)!;
+                    valid = () => store.IsOperatorAuthorized(remote!);
+                    allows = method => store.HasGrant(principal, method);
+                }
+                else
+                {
+                    Frame? authFrame = await FrameCodec.ReadAsync(ssl, application.Token);
+                    if (authFrame?.Type != FrameType.Auth)
+                        throw new AuthenticationException("Bootstrap AUTH required.");
+                    BootstrapAuth auth = ProtocolJson.Deserialize<BootstrapAuth>(authFrame.Payload);
+                    (Func<bool> Valid, Func<string, bool> Allows) authorization = execution.Authenticate(auth.Token) ?? throw new AuthenticationException("Invalid bootstrap.");
+                    valid = authorization.Valid;
+                    allows = authorization.Allows;
+                    principal = "execution";
+                    await FrameCodec.WriteAsync(ssl, new(FrameType.AuthResult, 0, 0, ProtocolJson.Serialize(new AuthenticationResult(true))), application.Token);
+                }
+
+                var session = new OperatorSession(principal, valid, allows);
+                await using var wire = new WireConnection(ssl, false, hello.MaxFrameBytes, valid);
+                wire.RequestHandler = (exchange, request) =>
+                {
+                    if (!request.Method.StartsWith("kernel.", StringComparison.Ordinal) && !features.Contains("execution-v1"))
+                        return exchange.ReplyAsync(KernelDispatcher.Error("UNSUPPORTED_METHOD", "Execution feature was not negotiated."));
+                    if (request.Method.StartsWith("shell.", StringComparison.Ordinal) && !features.Contains("shell-v1") || request.Method is "process.start" or "shell.command" && !features.Contains("streaming-v1"))
+                        return exchange.ReplyAsync(KernelDispatcher.Error("UNSUPPORTED_METHOD", "Required shell/streaming features were not negotiated."));
+                    return execution.HandleAsync(exchange, request, session, dispatcher!);
+                };
+                long wireId = Interlocked.Increment(ref nextConnection);
+                wires[wireId] = wire;
+                try
+                {
+                    wire.Start();
+                    await wire.Completion;
+                }
+                finally
+                {
+                    wires.TryRemove(wireId, out _);
                 }
             }
+            catch (Exception ex) when (ex is AuthenticationException or IOException or OperationCanceledException or SocketException or System.Text.Json.JsonException or CryptographicException or Microsoft.Data.Sqlite.SqliteException or UnauthorizedAccessException)
+            {
+                if (!stop.IsCancellationRequested)
+                    log($"Connection ended ({ex.GetType().Name}).");
+            }
         }
-        finally
-        {
-            await lifetime.CancelAsync();
-            if (pending is not null)
-                try { await pending; } catch (Exception ex) when (ex is IOException or OperationCanceledException) { }
-        }
-    }
-
-    private static async Task SendAsync(Stream stream, Frame frame, CancellationToken stop)
-    {
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stop);
-        deadline.CancelAfter(TimeSpan.FromSeconds(10));
-        await FrameCodec.WriteAsync(stream, frame, deadline.Token);
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (disposed) return;
+        if (disposed)
+            return;
         disposed = true;
-        await stopping.CancelAsync();
         listener.Stop();
-        if (acceptLoop is not null) await acceptLoop;
-        foreach (var client in clients.Values) client.Dispose();
-        try { await Task.WhenAll(connections.Values); }
+        await Task.WhenAll(wires.Values.Select(w => w.DrainAsync()));
+        await stopping.CancelAsync();
+        if (acceptLoop is not null)
+            await acceptLoop;
+        foreach (TcpClient client in clients.Values)
+            client.Dispose();
+        try
+        {
+            await Task.WhenAll(connections.Values);
+        }
         finally
         {
+            ownership.Dispose();
             serverCertificate.Dispose();
             caCertificate.Dispose();
             stopping.Dispose();

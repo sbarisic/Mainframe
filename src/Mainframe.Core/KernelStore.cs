@@ -5,22 +5,23 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.Data.Sqlite;
 
 namespace Mainframe.Core;
-
 /// <summary>Persistent identity for the first, local-only kernel. Network enrollment is a later milestone.</summary>
-public sealed class KernelStore : IDisposable
+public sealed partial class KernelStore : IDisposable
 {
-    public const int SchemaVersion = 1;
+    public const int SchemaVersion = 2;
     public const string InitialOperatorIdentity = "local-admin";
     private readonly string directory;
     private bool disposed;
-
     private KernelStore(string directory, KernelIdentity identity)
     {
         this.directory = directory;
         Identity = identity;
     }
 
-    public KernelIdentity Identity { get; }
+    public KernelIdentity Identity
+    {
+        get;
+    }
 
     public static KernelIdentity Initialize(string directory, string name)
     {
@@ -31,35 +32,32 @@ public sealed class KernelStore : IDisposable
         directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
         if (Directory.Exists(directory) || File.Exists(directory))
             throw new IOException("The state directory already exists. Initialization never overwrites existing data.");
-        var parent = Path.GetDirectoryName(directory)
-            ?? throw new IOException("The state directory cannot be a filesystem root.");
+        var parent = Path.GetDirectoryName(directory) ?? throw new IOException("The state directory cannot be a filesystem root.");
         PrivateStateDirectory.RejectLinks(parent);
         Directory.CreateDirectory(parent);
         var staging = Path.Combine(parent, $".mainframe-init-{Guid.NewGuid():N}");
         PrivateStateDirectory.Create(staging);
-
         // Publish a complete state directory atomically. If anything fails, keep the protected
         // staging directory for diagnosis; never delete or overwrite an existing installation.
-        var now = DateTimeOffset.UtcNow;
+        DateTimeOffset now = DateTimeOffset.UtcNow;
         var identity = new KernelIdentity(Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"), name.Trim(), now);
         using var caKey = RSA.Create(3072);
         var caRequest = new CertificateRequest($"CN=Mainframe {identity.MainframeId} Root", caKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         caRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, true, 0, true));
         caRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
         caRequest.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(caRequest.PublicKey, false));
-        using var ca = caRequest.CreateSelfSigned(now.AddMinutes(-5), now.AddYears(10));
-        using var server = IssueLeaf(ca, $"CN={identity.KernelId}", CertificateTrust.ServerAuthentication, now, server: true);
-        using var client = IssueLeaf(ca, $"CN={InitialOperatorIdentity}", CertificateTrust.ClientAuthentication, now, server: false);
+        using X509Certificate2 ca = caRequest.CreateSelfSigned(now.AddMinutes(-5), now.AddYears(10));
+        using X509Certificate2 server = IssueLeaf(ca, $"CN={identity.KernelId}", CertificateTrust.ServerAuthentication, now, server: true);
+        using X509Certificate2 client = IssueLeaf(ca, $"CN={InitialOperatorIdentity}", CertificateTrust.ClientAuthentication, now, server: false);
         WritePrivateCertificate(staging, "ca.pfx", ca);
         PrivateStateDirectory.Write(staging, "ca.cer", ca.Export(X509ContentType.Cert));
         WritePrivateCertificate(staging, "server.pfx", server);
         WritePrivateCertificate(staging, "operator.pfx", client);
         PrivateStateDirectory.Write(staging, "kernel.db", []);
-
-        using (var database = Connect(staging, initializing: true))
+        using (SqliteConnection database = Connect(staging, initializing: true))
         {
-            using var transaction = database.BeginTransaction();
-            using var schema = database.CreateCommand();
+            using SqliteTransaction transaction = database.BeginTransaction();
+            using SqliteCommand schema = database.CreateCommand();
             schema.Transaction = transaction;
             schema.CommandText = """
                 CREATE TABLE kernel_identity (
@@ -79,7 +77,7 @@ public sealed class KernelStore : IDisposable
                 PRAGMA user_version = 1;
                 """;
             schema.ExecuteNonQuery();
-            using var record = database.CreateCommand();
+            using SqliteCommand record = database.CreateCommand();
             record.Transaction = transaction;
             record.CommandText = """
                 INSERT INTO kernel_identity VALUES (1, $mainframe, $kernel, $name, $created);
@@ -108,22 +106,28 @@ public sealed class KernelStore : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
         PrivateStateDirectory.Validate(directory);
-        foreach (var name in new[] { "kernel.db", "ca.cer", "ca.pfx", "server.pfx", "operator.pfx" })
+        foreach (var name in new[]
+        {
+            "kernel.db",
+            "ca.cer",
+            "ca.pfx",
+            "server.pfx",
+            "operator.pfx"
+        }
+
+        )
             PrivateStateDirectory.ValidateFile(directory, name);
-        using var database = Connect(directory);
-        using var command = database.CreateCommand();
+        using SqliteConnection database = Connect(directory);
+        using SqliteCommand command = database.CreateCommand();
         command.CommandText = "SELECT mainframe_id, kernel_id, name, created_at FROM kernel_identity WHERE singleton = 1;";
-        using var reader = command.ExecuteReader();
+        using SqliteDataReader reader = command.ExecuteReader();
         if (!reader.Read())
             throw new InvalidDataException("Kernel metadata has no identity.");
-        return new KernelStore(directory, new KernelIdentity(reader.GetString(0), reader.GetString(1), reader.GetString(2),
-            DateTimeOffset.Parse(reader.GetString(3), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)));
+        return new KernelStore(directory, new KernelIdentity(reader.GetString(0), reader.GetString(1), reader.GetString(2), DateTimeOffset.Parse(reader.GetString(3), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)));
     }
 
     public X509Certificate2 LoadServerCertificate() => LoadLeaf("server.pfx", CertificateTrust.ServerAuthentication);
-
     public X509Certificate2 LoadOperatorCertificate() => LoadLeaf("operator.pfx", CertificateTrust.ClientAuthentication);
-
     public X509Certificate2 LoadCaCertificate()
     {
         ObjectDisposedException.ThrowIf(disposed, this);
@@ -131,15 +135,14 @@ public sealed class KernelStore : IDisposable
     }
 
     public bool IsOperatorAuthorized(X509Certificate2 certificate) => GetOperatorIdentity(certificate) is not null;
-
     public string? GetOperatorIdentity(X509Certificate2 certificate)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        using var ca = LoadCaCertificate();
+        using X509Certificate2 ca = LoadCaCertificate();
         if (!CertificateTrust.Validate(certificate, ca, CertificateTrust.ClientAuthentication))
             return null;
-        using var database = Connect(directory);
-        using var command = database.CreateCommand();
+        using SqliteConnection database = Connect(directory);
+        using SqliteCommand command = database.CreateCommand();
         command.CommandText = "SELECT principal_id FROM operator_identities WHERE thumbprint = $thumbprint AND certificate_serial = $serial AND disabled = 0;";
         command.Parameters.AddWithValue("$thumbprint", CertificateTrust.Fingerprint(certificate));
         command.Parameters.AddWithValue("$serial", certificate.SerialNumber);
@@ -150,8 +153,8 @@ public sealed class KernelStore : IDisposable
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(thumbprint);
-        using var database = Connect(directory);
-        using var command = database.CreateCommand();
+        using SqliteConnection database = Connect(directory);
+        using SqliteCommand command = database.CreateCommand();
         command.CommandText = "UPDATE operator_identities SET disabled = 1 WHERE thumbprint = $thumbprint;";
         command.Parameters.AddWithValue("$thumbprint", thumbprint.ToUpperInvariant());
         if (command.ExecuteNonQuery() != 1)
@@ -166,19 +169,13 @@ public sealed class KernelStore : IDisposable
         var parent = Path.GetDirectoryName(destination)!;
         PrivateStateDirectory.Validate(parent);
         PrivateStateDirectory.Write(parent, Path.GetFileName(destination), []);
-        using var source = Connect(directory);
-        using var target = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = destination,
-            Mode = SqliteOpenMode.ReadWrite,
-            Pooling = false
-        }.ToString());
+        using SqliteConnection source = Connect(directory);
+        using var target = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = destination, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString());
         target.Open();
         source.BackupDatabase(target);
     }
 
     public void Dispose() => disposed = true;
-
     private X509Certificate2 LoadLeaf(string fileName, string purpose)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
@@ -186,16 +183,13 @@ public sealed class KernelStore : IDisposable
         // creates a temporary user key container that is removed when this certificate
         // is disposed; deliberately do not set PersistKeySet. Other platforms can keep
         // the key entirely ephemeral.
-        var keyStorage = OperatingSystem.IsWindows()
-            ? X509KeyStorageFlags.UserKeySet
-            : X509KeyStorageFlags.EphemeralKeySet;
-        var certificate = X509CertificateLoader.LoadPkcs12FromFile(
-            PrivateStateDirectory.ValidateFile(directory, fileName), password: null, keyStorage);
+        X509KeyStorageFlags keyStorage = OperatingSystem.IsWindows() ? X509KeyStorageFlags.UserKeySet : X509KeyStorageFlags.EphemeralKeySet;
+        X509Certificate2 certificate = X509CertificateLoader.LoadPkcs12FromFile(PrivateStateDirectory.ValidateFile(directory, fileName), password: null, keyStorage);
         try
         {
-            using var ca = LoadCaCertificate();
+            using X509Certificate2 ca = LoadCaCertificate();
             if (!certificate.HasPrivateKey || !CertificateTrust.Validate(certificate, ca, purpose))
-                throw new InvalidDataException($"The {fileName} certificate is expired, invalid, or missing its private key. Certificate renewal is not implemented in this milestone.");
+                throw new InvalidDataException($"The {fileName} certificate is expired, invalid, or missing its private key. Expired identities require reenrollment; local renewal only accepts unexpired certificates in their final 24 hours.");
             return certificate;
         }
         catch
@@ -209,28 +203,42 @@ public sealed class KernelStore : IDisposable
     {
         PrivateStateDirectory.Validate(directory);
         var path = PrivateStateDirectory.ValidateFile(directory, "kernel.db");
-        foreach (var suffix in new[] { "-wal", "-shm", "-journal" })
-            if (File.Exists(path + suffix))
-                PrivateStateDirectory.ValidateFile(directory, "kernel.db" + suffix);
-        var database = new SqliteConnection(new SqliteConnectionStringBuilder
+        foreach (var suffix in new[]
         {
-            DataSource = path,
-            Mode = SqliteOpenMode.ReadWrite,
-            Pooling = false,
-            DefaultTimeout = 5
-        }.ToString());
+            "-wal",
+            "-shm",
+            "-journal"
+        }
+
+        )
+        {
+            // SQLite may remove a sidecar when the last of our non-pooled connections
+            // closes. Its disappearance during validation is not state corruption.
+            try
+            {
+                if (File.Exists(path + suffix))
+                    PrivateStateDirectory.ValidateFile(directory, "kernel.db" + suffix);
+            }
+            catch (FileNotFoundException)
+            {
+            }
+        }
+
+        var database = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 5 }.ToString());
         try
         {
             database.Open();
             // Refuse incompatible schemas before changing journal mode or performing any writes.
-            using var version = database.CreateCommand();
+            using SqliteCommand version = database.CreateCommand();
             version.CommandText = "PRAGMA user_version;";
             var actualVersion = Convert.ToInt32(version.ExecuteScalar(), CultureInfo.InvariantCulture);
-            if (actualVersion != (initializing ? 0 : SchemaVersion))
+            if (initializing ? actualVersion != 0 : actualVersion is < 1 or > SchemaVersion)
                 throw new InvalidDataException($"Unsupported kernel metadata schema {actualVersion}; this build requires schema {SchemaVersion}.");
-            using var settings = database.CreateCommand();
+            using SqliteCommand settings = database.CreateCommand();
             settings.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;";
             settings.ExecuteNonQuery();
+            if (!initializing && actualVersion < SchemaVersion)
+                Migrate(database);
             return database;
         }
         catch
@@ -256,7 +264,8 @@ public sealed class KernelStore : IDisposable
             san.AddIpAddress(IPAddress.IPv6Loopback);
             request.CertificateExtensions.Add(san.Build());
         }
-        using var issued = request.Create(ca, now.AddMinutes(-5), now.AddDays(7), RandomNumberGenerator.GetBytes(16));
+
+        using X509Certificate2 issued = request.Create(ca, now.AddMinutes(-5), now.AddDays(7), RandomNumberGenerator.GetBytes(16));
         return issued.CopyWithPrivateKey(key);
     }
 

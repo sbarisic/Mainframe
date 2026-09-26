@@ -1,112 +1,86 @@
-using System.Diagnostics;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Mainframe.Protocol;
 
 namespace Mainframe.Client;
 
-/// <summary>
-/// Authenticated unary RPC client. Calls are serialized and never replayed. A cancelled
-/// or timed-out call closes its connection because the remote outcome may be unknown.
-/// </summary>
 public sealed class KernelClient : IAsyncDisposable
 {
-    private static readonly TimeSpan StageTimeout = TimeSpan.FromSeconds(10);
-    private readonly TcpClient _tcp;
-    private readonly SslStream _stream;
-    private readonly CancellationTokenSource _lifetime = new();
-    private readonly SemaphoreSlim _callLock = new(1, 1);
-    private readonly SemaphoreSlim _writeLock = new(1, 1);
-    private readonly object _stateLock = new();
-    private readonly Task _readTask;
-    private readonly Task _heartbeatTask;
-    private TaskCompletionSource<Frame>? _pending;
-    private ulong _pendingId;
-    private ulong _nextExchangeId = 1;
-    private byte[]? _heartbeatToken;
-    private Exception? _failure;
-    private bool _goingAway;
-    private int _disposed;
-    private long _lastReceived = Stopwatch.GetTimestamp();
-    private long _lastActivity = Stopwatch.GetTimestamp();
-
-    public WelcomeResponse Welcome { get; }
-
-    private KernelClient(TcpClient tcp, SslStream stream, WelcomeResponse welcome)
+    private readonly TcpClient tcp;
+    private readonly WireConnection wire;
+    public WelcomeResponse Welcome
     {
-        _tcp = tcp;
-        _stream = stream;
-        Welcome = welcome;
-        _readTask = ReadLoopAsync();
-        _heartbeatTask = HeartbeatLoopAsync();
+        get;
     }
 
-    public static async Task<KernelClient> ConnectAsync(
-        string host, int port, X509Certificate2 clientCertificate, X509Certificate2 caCertificate,
-        CancellationToken cancellationToken = default)
+    private KernelClient(TcpClient tcp, WireConnection wire, WelcomeResponse welcome)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(host);
-        ArgumentOutOfRangeException.ThrowIfLessThan(port, 1);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(port, 65535);
-        ArgumentNullException.ThrowIfNull(clientCertificate);
-        ArgumentNullException.ThrowIfNull(caCertificate);
-        if (!clientCertificate.HasPrivateKey)
-            throw new ArgumentException("The operator certificate requires a private key.", nameof(clientCertificate));
+        this.tcp = tcp;
+        this.wire = wire;
+        Welcome = welcome;
+        wire.Start();
+    }
 
-        var tcp = new TcpClient { NoDelay = true };
-        SslStream? stream = null;
+    public static Task<KernelClient> ConnectAsync(string host, int port, X509Certificate2 clientCertificate, X509Certificate2 caCertificate, CancellationToken cancellationToken = default) => ConnectCoreAsync(host, port, clientCertificate, caCertificate, null, cancellationToken);
+    public static async Task<KernelClient> ConnectProgramAsync(BootstrapCredential credential, CancellationToken cancellationToken = default)
+    {
+        using X509Certificate2 ca = X509CertificateLoader.LoadCertificate(Convert.FromBase64String(credential.CaCertificate));
+        return await ConnectCoreAsync(credential.Host, credential.Port, null, ca, credential.Token, cancellationToken);
+    }
+
+    private static async Task<KernelClient> ConnectCoreAsync(string host, int port, X509Certificate2? certificate, X509Certificate2 ca, string? bootstrap, CancellationToken token)
+    {
+        var tcp = new TcpClient
+        {
+            NoDelay = true
+        };
+        SslStream? ssl = null;
         try
         {
-            using (var connectDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(token))
             {
-                connectDeadline.CancelAfter(StageTimeout);
-                await tcp.ConnectAsync(host, port, connectDeadline.Token).ConfigureAwait(false);
+                timeout.CancelAfter(10000);
+                await tcp.ConnectAsync(host, port, timeout.Token);
             }
-            stream = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false,
-                (_, certificate, _, errors) => ValidateServerCertificate(certificate, errors, caCertificate));
-            using (var tlsDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+
+            ssl = new SslStream(tcp.GetStream(), false, (_, cert, _, errors) => ValidateServerCertificate(cert, errors, ca));
+            using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(token))
             {
-                tlsDeadline.CancelAfter(StageTimeout);
-                await stream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
-                {
-                    TargetHost = host,
-                    EnabledSslProtocols = SslProtocols.Tls13,
-                    ClientCertificates = new X509CertificateCollection { clientCertificate },
-                    CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
-                    EncryptionPolicy = EncryptionPolicy.RequireEncryption
-                }, tlsDeadline.Token).ConfigureAwait(false);
+                timeout.CancelAfter(10000);
+                await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = host, EnabledSslProtocols = SslProtocols.Tls13, ClientCertificates = certificate is null ? null : new X509CertificateCollection { certificate }, CertificateRevocationCheckMode = X509RevocationMode.NoCheck }, timeout.Token);
             }
-            using var helloDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            helloDeadline.CancelAfter(StageTimeout);
-            var hello = new HelloRequest([ProtocolVersions.Current], [], [ProtocolVersions.UnaryRpcFeature],
-                "terminal", "mf", FrameCodec.MaxPayloadBytes);
-            await FrameCodec.WriteAsync(stream, new Frame(FrameType.Hello, 0, 0, ProtocolJson.Serialize(hello)), helloDeadline.Token).ConfigureAwait(false);
-            Frame frame = await FrameCodec.ReadAsync(stream, helloDeadline.Token).ConfigureAwait(false)
-                ?? throw new ProtocolException("The kernel closed the connection before WELCOME.");
-            if (frame.Type == FrameType.GoAway)
-                throw new ProtocolException($"The kernel rejected the connection: {ProtocolJson.Deserialize<GoAwayMessage>(frame.Payload).Reason}");
-            if (frame.Type != FrameType.Welcome)
-                throw new ProtocolException("Expected WELCOME after HELLO.");
+
+            using var helloTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            helloTimeout.CancelAfter(10000);
+            var hello = new HelloRequest([1], ExecutionFeatures.All.Where(f => f != "unary-rpc").ToArray(), ["unary-rpc"], bootstrap is null ? "terminal" : "program", "mframe", FrameCodec.MaxPayloadBytes);
+            await FrameCodec.WriteAsync(ssl, new(FrameType.Hello, 0, 0, ProtocolJson.Serialize(hello)), helloTimeout.Token);
+            Frame? frame = await FrameCodec.ReadAsync(ssl, helloTimeout.Token);
+            if (frame?.Type != FrameType.Welcome)
+                throw new ProtocolException("Kernel did not accept HELLO.");
             WelcomeResponse welcome = ProtocolJson.Deserialize<WelcomeResponse>(frame.Payload);
-            if (welcome.Version != ProtocolVersions.Current ||
-                !welcome.Features.Contains(ProtocolVersions.UnaryRpcFeature, StringComparer.Ordinal) ||
-                welcome.Features.Any(feature => feature != ProtocolVersions.UnaryRpcFeature))
-                throw new ProtocolException("The kernel selected unsupported protocol features.");
-            if (welcome.Authentication != "authenticated")
-                throw new AuthenticationException("The kernel did not authenticate the operator certificate.");
-            if (frame.Payload.Length > welcome.MaxFrameBytes)
-                throw new ProtocolException("WELCOME exceeds its negotiated payload limit.");
-            return new KernelClient(tcp, stream, welcome);
+            if (welcome.Version != 1 || !welcome.Features.Contains("unary-rpc") || welcome.Features.Any(f => !ExecutionFeatures.All.Contains(f)))
+                throw new ProtocolException("Unsupported negotiated protocol.");
+            if (bootstrap is not null)
+            {
+                if (welcome.Authentication != "required")
+                    throw new AuthenticationException("Expected bootstrap authentication.");
+                await FrameCodec.WriteAsync(ssl, new(FrameType.Auth, 0, 0, ProtocolJson.Serialize(new BootstrapAuth(bootstrap))), helloTimeout.Token);
+                Frame? auth = await FrameCodec.ReadAsync(ssl, helloTimeout.Token);
+                if (auth?.Type != FrameType.AuthResult || !ProtocolJson.Deserialize<AuthenticationResult>(auth.Payload).Ok)
+                    throw new AuthenticationException("Bootstrap rejected.");
+            }
+            else if (welcome.Authentication != "authenticated")
+                throw new AuthenticationException("Operator authentication failed.");
+            return new(tcp, new WireConnection(ssl, true, welcome.MaxFrameBytes), welcome);
         }
         catch
         {
-            if (stream is not null)
-                await stream.DisposeAsync().ConfigureAwait(false);
+            if (ssl is not null)
+                await ssl.DisposeAsync();
             tcp.Dispose();
             throw;
         }
@@ -114,181 +88,57 @@ public sealed class KernelClient : IAsyncDisposable
 
     public async Task<JsonElement> CallAsync(string method, object? arguments = null, CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(method);
-        if (method.Length > 128)
-            throw new ArgumentException("Method names must not exceed 128 characters.", nameof(method));
-        JsonElement args = ProtocolJson.ToElement(arguments ?? new JsonObject());
-        if (args.ValueKind != JsonValueKind.Object)
-            throw new ArgumentException("RPC arguments must be a JSON object.", nameof(arguments));
-        byte[] payload = ProtocolJson.Serialize(new RpcRequest(method, 1, 10_000, args));
-        if (payload.Length > Welcome.MaxFrameBytes)
-            throw new ProtocolException("Request exceeds the negotiated frame limit.");
+        KernelInvocation call = await BeginAsync(method, arguments, cancellationToken);
+        if (call.Response.Streaming)
+        {
+            await call.Exchange.CancelAsync();
+            throw new InvalidOperationException("Use the streaming execution API.");
+        }
 
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
-        deadline.CancelAfter(StageTimeout);
-        bool acquired = false;
-        bool began = false;
+        return call.Response.Result!.Value;
+    }
+
+    public async Task<KernelInvocation> BeginAsync(string method, object? arguments = null, CancellationToken cancellationToken = default)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(10000);
+        WireExchange exchange = await wire.RequestAsync(new(method, 1, 10000, ProtocolJson.ToElement(arguments ?? new EmptyArguments())), timeout.Token);
         try
         {
-            await _callLock.WaitAsync(deadline.Token).ConfigureAwait(false);
-            acquired = true;
-            TaskCompletionSource<Frame> pending;
-            ulong exchangeId;
-            lock (_stateLock)
-            {
-                ThrowIfUnavailable();
-                if (_nextExchangeId > ulong.MaxValue - 2)
-                    throw new ProtocolException("Exchange IDs are exhausted; create a new connection.");
-                exchangeId = _nextExchangeId;
-                _nextExchangeId += 2;
-                pending = new TaskCompletionSource<Frame>(TaskCreationOptions.RunContinuationsAsynchronously);
-                _pending = pending;
-                _pendingId = exchangeId;
-                began = true;
-            }
-            await SendAsync(new Frame(FrameType.Request, exchangeId, 0, payload), deadline.Token).ConfigureAwait(false);
-            Frame frame = await pending.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
-            RpcResponse response = ProtocolJson.Deserialize<RpcResponse>(frame.Payload);
-            if (response.Streaming)
-                throw new ProtocolException("The unary client cannot accept a streaming response.");
-            if (!response.Ok)
-                throw new KernelRpcException(response.Error!.Code, response.Error.Message, response.Error.Outcome);
-            return response.Result!.Value.Clone();
+            RpcResponse response = await exchange.Response.Task.WaitAsync(timeout.Token);
+            Check(response);
+            return new(exchange, response);
         }
-        catch (KernelRpcException)
+        catch (OperationCanceledException)
         {
+            try
+            {
+                await exchange.CancelAsync();
+            }
+            catch (IOException)
+            {
+            }
+
             throw;
         }
-        catch (Exception ex)
-        {
-            bool timedOut = ex is OperationCanceledException && !cancellationToken.IsCancellationRequested && !_lifetime.IsCancellationRequested;
-            if (began)
-                Fail(ex);
-            if (timedOut)
-                throw new TimeoutException("The kernel request deadline elapsed; its remote outcome may be unknown.", ex);
-            throw;
-        }
-        finally
-        {
-            if (began)
-            {
-                bool closeAfterDrain;
-                lock (_stateLock)
-                {
-                    _pending = null;
-                    _pendingId = 0;
-                    closeAfterDrain = _goingAway;
-                }
-                if (closeAfterDrain)
-                    Fail(new IOException("The kernel is shutting down."));
-            }
-            if (acquired)
-                _callLock.Release();
-        }
     }
 
-    private async Task ReadLoopAsync()
+    public async Task<ProgramRegistration> RegisterProgramAsync(ProgramManifest manifest, CancellationToken token = default) => Decode<ProgramRegistration>(await CallAsync("program.register", new RegisterProgramRequest(manifest), token));
+    public async Task<ProgramRegistration[]> ListProgramsAsync(CancellationToken token = default) => Decode<ProgramRegistration[]>(await CallAsync("program.list", cancellationToken: token));
+    public Task<JsonElement> RemoveProgramAsync(string name, CancellationToken token = default) => CallAsync("program.remove", new SelectorRequest(name), token);
+    public Task<JsonElement> AddHostRootAsync(HostRoot root, CancellationToken token = default) => CallAsync("host-root.add", root, token);
+    public async Task<HostRoot[]> ListHostRootsAsync(CancellationToken token = default) => Decode<HostRoot[]>(await CallAsync("host-root.list", cancellationToken: token));
+    public Task<JsonElement> RemoveHostRootAsync(string name, CancellationToken token = default) => CallAsync("host-root.remove", new SelectorRequest(name), token);
+    public async Task<ShellState> OpenShellAsync(CancellationToken token = default) => Decode<ShellState>(await CallAsync("shell.open", cancellationToken: token));
+    public Task<KernelInvocation> ExecuteShellAsync(ShellCommandRequest request, CancellationToken token = default) => BeginAsync("shell.command", request, token);
+    public Task<KernelInvocation> StartProcessAsync(ProcessStartRequest request, CancellationToken token = default) => BeginAsync("process.start", request, token);
+    public Task<JsonElement> ResizeAsync(string processId, int columns, int rows, CancellationToken token = default) => CallAsync("process.resize", new ProcessControlRequest(processId, Columns: columns, Rows: rows), token);
+    public Task<JsonElement> InterruptAsync(string processId, CancellationToken token = default) => CallAsync("process.interrupt", new ProcessControlRequest(processId), token);
+    public static T Decode<T>(JsonElement value) => ProtocolJson.Deserialize<T>(ProtocolJson.Serialize(value));
+    internal static void Check(RpcResponse response)
     {
-        try
-        {
-            while (!_lifetime.IsCancellationRequested)
-            {
-                Frame frame = await FrameCodec.ReadAsync(_stream, Welcome.MaxFrameBytes, _lifetime.Token).ConfigureAwait(false)
-                    ?? throw new IOException("The kernel closed the connection.");
-                Interlocked.Exchange(ref _lastReceived, Stopwatch.GetTimestamp());
-                Interlocked.Exchange(ref _lastActivity, Stopwatch.GetTimestamp());
-                switch (frame.Type)
-                {
-                    case FrameType.Response:
-                        lock (_stateLock)
-                        {
-                            if (_pending is null || frame.ExchangeId != _pendingId || !_pending.TrySetResult(frame))
-                                throw new ProtocolException("Response does not match the active exchange.");
-                        }
-                        break;
-                    case FrameType.Ping:
-                        await SendAsync(new Frame(FrameType.Pong, 0, 0, frame.Payload), _lifetime.Token).ConfigureAwait(false);
-                        break;
-                    case FrameType.Pong:
-                        lock (_stateLock)
-                        {
-                            if (_heartbeatToken is null || !CryptographicOperations.FixedTimeEquals(_heartbeatToken, frame.Payload))
-                                throw new ProtocolException("PONG does not match an outstanding PING.");
-                            _heartbeatToken = null;
-                        }
-                        break;
-                    case FrameType.GoAway:
-                        GoAwayMessage shutdown = ProtocolJson.Deserialize<GoAwayMessage>(frame.Payload);
-                        bool hasPending;
-                        lock (_stateLock)
-                        {
-                            if (_goingAway)
-                                throw new ProtocolException("Duplicate GOAWAY.");
-                            _goingAway = true;
-                            hasPending = _pending is not null;
-                        }
-                        if (!hasPending)
-                            throw new IOException($"The kernel is shutting down: {shutdown.Reason}");
-                        _ = StopAfterDrainAsync(shutdown.DrainTimeoutMs ?? 10_000);
-                        break;
-                    default:
-                        throw new ProtocolException("Unexpected frame on an authenticated unary connection.");
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Fail(ex);
-        }
-    }
-
-    private async Task HeartbeatLoopAsync()
-    {
-        try
-        {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
-            while (await timer.WaitForNextTickAsync(_lifetime.Token).ConfigureAwait(false))
-            {
-                if (Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastReceived)) >= TimeSpan.FromSeconds(30))
-                    throw new IOException("The kernel is unresponsive.");
-                byte[]? token = null;
-                lock (_stateLock)
-                {
-                    if (!_goingAway && _heartbeatToken is null && Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastActivity)) >= TimeSpan.FromSeconds(10))
-                        token = _heartbeatToken = RandomNumberGenerator.GetBytes(8);
-                }
-                if (token is not null)
-                    await SendAsync(new Frame(FrameType.Ping, 0, 0, token), _lifetime.Token).ConfigureAwait(false);
-            }
-        }
-        catch (Exception ex)
-        {
-            Fail(ex);
-        }
-    }
-
-    private async Task StopAfterDrainAsync(int milliseconds)
-    {
-        try
-        {
-            await Task.Delay(milliseconds, _lifetime.Token).ConfigureAwait(false);
-            Fail(new IOException("The kernel shutdown drain deadline elapsed."));
-        }
-        catch (OperationCanceledException) { }
-    }
-
-    private async Task SendAsync(Frame frame, CancellationToken cancellationToken)
-    {
-        await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            await FrameCodec.WriteAsync(_stream, frame, cancellationToken).ConfigureAwait(false);
-            Interlocked.Exchange(ref _lastActivity, Stopwatch.GetTimestamp());
-        }
-        finally
-        {
-            _writeLock.Release();
-        }
+        if (!response.Ok)
+            throw new KernelRpcException(response.Error!.Code, response.Error.Message, response.Error.Outcome);
     }
 
     private static bool ValidateServerCertificate(X509Certificate? certificate, SslPolicyErrors errors, X509Certificate2 root)
@@ -298,8 +148,7 @@ public sealed class KernelClient : IAsyncDisposable
         using var server = new X509Certificate2(certificate);
         X509BasicConstraintsExtension[] constraints = server.Extensions.OfType<X509BasicConstraintsExtension>().ToArray();
         X509EnhancedKeyUsageExtension[] usages = server.Extensions.OfType<X509EnhancedKeyUsageExtension>().ToArray();
-        if (constraints.Length != 1 || constraints[0].CertificateAuthority || usages.Length != 1 ||
-            !usages[0].EnhancedKeyUsages.Cast<Oid>().Any(oid => oid.Value == "1.3.6.1.5.5.7.3.1"))
+        if (constraints.Length != 1 || constraints[0].CertificateAuthority || usages.Length != 1 || !usages[0].EnhancedKeyUsages.Cast<Oid>().Any(oid => oid.Value == "1.3.6.1.5.5.7.3.1"))
             return false;
         using var chain = new X509Chain();
         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
@@ -307,40 +156,31 @@ public sealed class KernelClient : IAsyncDisposable
         chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
         chain.ChainPolicy.DisableCertificateDownloads = true;
         chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
-        return chain.Build(server) && chain.ChainElements.Count > 1 &&
-            chain.ChainElements[^1].Certificate.RawData.AsSpan().SequenceEqual(root.RawData);
-    }
-
-    private void ThrowIfUnavailable()
-    {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        if (_failure is not null)
-            throw new IOException("The kernel connection is closed.", _failure);
-        if (_goingAway)
-            throw new IOException("The kernel is shutting down and accepts no new requests.");
-    }
-
-    private void Fail(Exception failure)
-    {
-        lock (_stateLock)
-        {
-            if (_failure is not null)
-                return;
-            _failure = failure;
-            _pending?.TrySetException(failure);
-        }
-        _lifetime.Cancel();
-        _tcp.Dispose();
+        return chain.Build(server) && chain.ChainElements.Count > 1 && chain.ChainElements[^1].Certificate.RawData.AsSpan().SequenceEqual(root.RawData);
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
-            return;
-        Fail(new ObjectDisposedException(nameof(KernelClient)));
-        await Task.WhenAll(_readTask, _heartbeatTask).ConfigureAwait(false);
-        await _stream.DisposeAsync().ConfigureAwait(false);
-        // The semaphore and cancellation objects may still be observed by a concurrently
-        // cancelled caller. Their managed resources are reclaimed with this client.
+        await wire.DisposeAsync();
+        tcp.Dispose();
+    }
+}
+
+public sealed class KernelInvocation(WireExchange exchange, RpcResponse response)
+{
+    public WireExchange Exchange { get; } = exchange;
+    public RpcResponse Response { get; } = response;
+    public ProcessStarted Process => KernelClient.Decode<ProcessStarted>(Response.Result!.Value);
+    public Stream Stdout => Exchange.Channel(2).Input;
+    public Stream? Stderr => Process.Channels.Any(c => c.Id == 3) ? Exchange.Channel(3).Input : null;
+
+    public Task WriteInputAsync(ReadOnlyMemory<byte> bytes, CancellationToken token = default) => Exchange.Channel(1).SendAsync(bytes, token);
+    public Task EndInputAsync() => Exchange.Channel(1).EndAsync();
+    public Task CancelAsync() => Exchange.CancelAsync();
+    public async Task<ProcessExited> WaitAsync(CancellationToken token = default)
+    {
+        RpcResponse result = await Exchange.Completion.Task.WaitAsync(token);
+        KernelClient.Check(result);
+        return KernelClient.Decode<ProcessExited>(result.Result!.Value);
     }
 }

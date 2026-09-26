@@ -11,10 +11,10 @@ public sealed class CliTests
     [MemberData(nameof(HelpArguments))]
     public async Task HelpDoesNotRequireInitializedState(string[] arguments)
     {
-        var result = await RunAsync(arguments);
+        (int Code, string Output, string Error) result = await RunAsync(arguments);
         Assert.Equal(0, result.Code);
-        Assert.Contains("mf cluster init", result.Output);
-        Assert.Contains("mfd serve", result.Output);
+        Assert.Contains("mframe cluster init", result.Output);
+        Assert.Contains("mframed serve", result.Output);
         Assert.Empty(result.Error);
     }
 
@@ -22,9 +22,9 @@ public sealed class CliTests
     [MemberData(nameof(CommandHelpArguments))]
     public async Task CommandHelpDoesNotConnectToKernel(string[] arguments)
     {
-        var result = await RunAsync(arguments);
+        (int Code, string Output, string Error) result = await RunAsync(arguments);
         Assert.Equal(0, result.Code);
-        Assert.Contains("Usage: mf status", result.Output);
+        Assert.Contains("Usage: mframe status", result.Output);
         Assert.Empty(result.Error);
     }
 
@@ -32,19 +32,19 @@ public sealed class CliTests
     [MemberData(nameof(VersionArguments))]
     public async Task VersionWorksWithoutKernel(string[] arguments)
     {
-        var result = await RunAsync(arguments);
+        (int Code, string Output, string Error) result = await RunAsync(arguments);
         Assert.Equal(0, result.Code);
-        Assert.StartsWith("mf ", result.Output);
+        Assert.StartsWith("mframe ", result.Output);
         Assert.Empty(result.Error);
     }
 
     [Fact]
     public async Task JsonOutputContainsOnlyStructuredResult()
     {
-        var result = await RunAsync(["--json", "version"]);
+        (int Code, string Output, string Error) result = await RunAsync(["--json", "version"]);
         Assert.Equal(0, result.Code);
         using var parsed = JsonDocument.Parse(result.Output);
-        Assert.Equal("mf", parsed.RootElement.GetProperty("name").GetString());
+        Assert.Equal("mframe", parsed.RootElement.GetProperty("name").GetString());
         Assert.False(string.IsNullOrEmpty(parsed.RootElement.GetProperty("version").GetString()));
         Assert.Empty(result.Error);
     }
@@ -53,10 +53,10 @@ public sealed class CliTests
     [MemberData(nameof(InvalidArguments))]
     public async Task InvalidUsageReturnsTwoOnStderr(string[] arguments)
     {
-        var result = await RunAsync(arguments);
+        (int Code, string Output, string Error) result = await RunAsync(arguments);
         Assert.Equal(2, result.Code);
         Assert.Empty(result.Output);
-        Assert.StartsWith("mf: ", result.Error);
+        Assert.StartsWith("mframe: ", result.Error);
     }
 
     [Theory]
@@ -70,10 +70,10 @@ public sealed class CliTests
     [InlineData("localhost:7443?option=true")]
     public async Task InvalidAndNonLoopbackEndpointsFailBeforeLoadingState(string endpoint)
     {
-        var result = await RunAsync(["--endpoint", endpoint, "status"]);
+        (int Code, string Output, string Error) result = await RunAsync(["--endpoint", endpoint, "status"]);
         Assert.Equal(2, result.Code);
         Assert.Empty(result.Output);
-        Assert.StartsWith("mf: ", result.Error);
+        Assert.StartsWith("mframe: ", result.Error);
     }
 
     [Theory]
@@ -83,7 +83,7 @@ public sealed class CliTests
     public async Task MissingCredentialsFailWithoutCreatingState(string endpoint)
     {
         var state = Path.Combine(Path.GetTempPath(), $"mainframe-cli-missing-{Guid.NewGuid():N}");
-        var result = await RunAsync(["--state", state, "status", "--endpoint", endpoint]);
+        (int Code, string Output, string Error) result = await RunAsync(["--state", state, "status", "--endpoint", endpoint]);
         Assert.Equal(1, result.Code);
         Assert.Contains("No operator credentials", result.Error);
         Assert.Empty(result.Output);
@@ -109,7 +109,7 @@ public sealed class CliTests
     {
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
-        var result = await RunAsync(["version"], cancellation.Token);
+        (int Code, string Output, string Error) result = await RunAsync(["version"], cancellation.Token);
         Assert.Equal(130, result.Code);
         Assert.Empty(result.Output);
         Assert.Contains("Cancelled", result.Error);
@@ -144,32 +144,19 @@ public sealed class CliTests
     {
         public string Name => "timeout";
         public string Description => "Test deadlines.";
-        public string Usage => "mf timeout";
-        public Task<int> ExecuteAsync(CommandContext context, CancellationToken cancellationToken) =>
-            throw new TimeoutException("The kernel request deadline elapsed.");
+        public string Usage => "mframe timeout";
+
+        public Task<int> ExecuteAsync(CommandContext context, CancellationToken cancellationToken) => throw new TimeoutException("The kernel request deadline elapsed.");
     }
 
-    public static IEnumerable<object[]> CommandHelpArguments => Cases(
-        ["help", "status"], ["status", "--help"], ["--help", "status"]);
-
+    public static IEnumerable<object[]> CommandHelpArguments => Cases(["help", "status"], ["status", "--help"], ["--help", "status"]);
     public static IEnumerable<object[]> VersionArguments => Cases(["version"], ["--version"]);
+    public static IEnumerable<object[]> InvalidArguments => Cases(["unknown"], ["status", "--unknown"], ["status", "--state"], ["status", "--state", "--json"], ["status", "--json", "--json"], ["status", "--state", "a", "--state", "b"], ["status", "extra"], ["status", "--name", "unused"], ["cluster", "join"], ["help", "status", "extra"], ["--json"]);
 
-    public static IEnumerable<object[]> InvalidArguments => Cases(
-        ["unknown"], ["status", "--unknown"], ["status", "--state"],
-        ["status", "--state", "--json"], ["status", "--json", "--json"],
-        ["status", "--state", "a", "--state", "b"], ["status", "extra"],
-        ["status", "--name", "unused"], ["cluster", "join"],
-        ["help", "status", "extra"], ["--json"]);
-
-    private static IEnumerable<object[]> Cases(params string[][] arguments) =>
-        arguments.Select(argument => new object[] { argument });
-
+    private static IEnumerable<object[]> Cases(params string[][] arguments) => arguments.Select(argument => new object[] { argument });
     private static async Task<(int Code, string Output, string Error)> RunAsync(string[] arguments, CancellationToken token = default)
     {
-        var router = new CommandRouter([
-            new ClusterCommand(), new StatusCommand(), new HealthCommand(),
-            new CapabilitiesCommand(), new VersionCommand()
-        ]);
+        var router = new CommandRouter([new ClusterCommand(), new StatusCommand(), new HealthCommand(), new CapabilitiesCommand(), new VersionCommand()]);
         using var output = new StringWriter();
         using var error = new StringWriter();
         var code = await router.RunAsync(arguments, output, error, token);
@@ -180,7 +167,8 @@ public sealed class CliTests
     {
         public string Name => "capture";
         public string Description => "Test argument parsing.";
-        public string Usage => "mf capture";
+        public string Usage => "mframe capture";
+
         public Task<int> ExecuteAsync(CommandContext context, CancellationToken cancellationToken)
         {
             context.RequireNoArguments(Usage);
@@ -194,8 +182,8 @@ public sealed class CliTests
     {
         public string Name => "fail";
         public string Description => "Test error reporting.";
-        public string Usage => "mf fail";
-        public Task<int> ExecuteAsync(CommandContext context, CancellationToken cancellationToken) =>
-            throw new KernelRpcException("PERMISSION_DENIED", "Denied.", "not_started");
+        public string Usage => "mframe fail";
+
+        public Task<int> ExecuteAsync(CommandContext context, CancellationToken cancellationToken) => throw new KernelRpcException("PERMISSION_DENIED", "Denied.", "not_started");
     }
 }

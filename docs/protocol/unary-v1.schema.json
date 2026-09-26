@@ -2,77 +2,242 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:mainframe:protocol:unary-v1",
   "title": "Mainframe v1 implemented unary controls",
-  "description": "Select the definition using the binary frame type. Unknown properties are allowed. The framing parser separately rejects duplicate properties, excessive JSON depth, and invalid IDs. Streaming, enrollment and peer contracts are not implemented yet.",
+  "description": "Common JSON envelopes. Execution contracts are in execution-v1.schema.json. Duplicate properties and depth over 32 are rejected by the parser.",
   "$defs": {
     "features": {
-      "type": "array", "maxItems": 32, "uniqueItems": true,
-      "items": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" }
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "\\S"
+      }
     },
     "hello": {
       "type": "object",
-      "required": ["versions", "optionalFeatures", "requiredFeatures", "role", "clientName", "maxFrameBytes"],
+      "required": [
+        "versions",
+        "optionalFeatures",
+        "requiredFeatures",
+        "role",
+        "clientName",
+        "maxFrameBytes"
+      ],
       "properties": {
-        "versions": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "type": "integer", "minimum": 1, "maximum": 2147483647 } },
-        "optionalFeatures": { "$ref": "#/$defs/features" },
-        "requiredFeatures": { "$ref": "#/$defs/features" },
-        "role": { "enum": ["terminal", "program", "peer", "filesystem"] },
-        "clientName": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" },
-        "maxFrameBytes": { "type": "integer", "minimum": 1, "maximum": 1048576 }
+        "versions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          }
+        },
+        "optionalFeatures": {
+          "$ref": "#/$defs/features"
+        },
+        "requiredFeatures": {
+          "$ref": "#/$defs/features"
+        },
+        "role": {
+          "enum": [
+            "terminal",
+            "program",
+            "peer",
+            "filesystem"
+          ]
+        },
+        "clientName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "maxFrameBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        }
       }
     },
     "welcome": {
       "type": "object",
-      "required": ["version", "features", "kernelId", "mainframeId", "maxFrameBytes", "authentication"],
+      "required": [
+        "version",
+        "features",
+        "kernelId",
+        "mainframeId",
+        "maxFrameBytes",
+        "authentication"
+      ],
       "properties": {
-        "version": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
-        "features": { "$ref": "#/$defs/features" },
-        "kernelId": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S" },
-        "mainframeId": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S" },
-        "maxFrameBytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
-        "authentication": { "enum": ["authenticated", "required"] }
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "features": {
+          "$ref": "#/$defs/features"
+        },
+        "kernelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "\\S"
+        },
+        "mainframeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "\\S"
+        },
+        "maxFrameBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "authentication": {
+          "enum": [
+            "authenticated",
+            "required"
+          ]
+        }
       }
     },
     "request": {
-      "type": "object", "required": ["method", "version", "arguments"],
+      "type": "object",
+      "required": [
+        "method",
+        "version",
+        "arguments"
+      ],
       "properties": {
-        "method": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" },
-        "version": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
-        "timeoutMs": { "type": ["integer", "null"], "minimum": 1, "maximum": 2147483647 },
-        "arguments": { "type": "object" }
+        "method": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "timeoutMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "arguments": {
+          "type": "object"
+        }
       }
     },
     "response": {
       "oneOf": [
         {
-          "type": "object", "required": ["ok", "result"],
+          "type": "object",
+          "required": [
+            "ok",
+            "result"
+          ],
           "properties": {
-            "ok": { "const": true }, "streaming": { "const": false },
-            "result": { "type": ["object", "array", "string", "number", "boolean"] },
-            "error": { "type": "null" }
+            "ok": {
+              "const": true
+            },
+            "streaming": {
+              "type": "boolean"
+            },
+            "result": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean"
+              ]
+            },
+            "error": {
+              "type": "null"
+            }
           }
         },
         {
-          "type": "object", "required": ["ok", "error"],
+          "type": "object",
+          "required": [
+            "ok",
+            "error"
+          ],
           "properties": {
-            "ok": { "const": false }, "streaming": { "const": false },
-            "result": { "type": "null" }, "error": { "$ref": "#/$defs/error" }
+            "ok": {
+              "const": false
+            },
+            "streaming": {
+              "const": false
+            },
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
           }
         }
       ]
     },
     "error": {
-      "type": "object", "required": ["code", "message", "outcome"],
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "outcome"
+      ],
       "properties": {
-        "code": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" },
-        "message": { "type": "string", "maxLength": 4096 },
-        "outcome": { "enum": ["not_started", "completed", "unknown"] }
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "outcome": {
+          "enum": [
+            "not_started",
+            "completed",
+            "unknown"
+          ]
+        }
       }
     },
     "goAway": {
-      "type": "object", "required": ["reason"],
+      "type": "object",
+      "required": [
+        "reason"
+      ],
       "properties": {
-        "reason": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "\\S" },
-        "drainTimeoutMs": { "type": ["integer", "null"], "minimum": 0, "maximum": 10000 }
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "drainTimeoutMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 10000
+        }
       }
     }
   }

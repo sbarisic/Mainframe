@@ -1,23 +1,18 @@
 using System.Buffers.Binary;
 
 namespace Mainframe.Protocol;
-
 /// <summary>Encodes v1 frames. Exchange lifecycle and role authorization belong to the connection.</summary>
 public static class FrameCodec
 {
     public const int HeaderSize = 20;
     public const int MaxPayloadBytes = 1_048_576;
-
-    public static FrameHeader ValidateHeader(ReadOnlySpan<byte> header)
-        => ValidateHeader(header, MaxPayloadBytes);
-
+    public static FrameHeader ValidateHeader(ReadOnlySpan<byte> header) => ValidateHeader(header, MaxPayloadBytes);
     public static FrameHeader ValidateHeader(ReadOnlySpan<byte> header, int maxPayloadBytes)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maxPayloadBytes, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(maxPayloadBytes, MaxPayloadBytes);
         if (header.Length != HeaderSize)
             throw new ProtocolException("A frame header must contain exactly 20 bytes.");
-
         uint length = BinaryPrimitives.ReadUInt32BigEndian(header);
         if (length > maxPayloadBytes)
             throw new ProtocolException("The frame payload exceeds the negotiated limit.");
@@ -26,7 +21,6 @@ public static class FrameCodec
             throw new ProtocolException("Reserved frame flags must be zero.");
         ulong exchangeId = BinaryPrimitives.ReadUInt64BigEndian(header[8..]);
         uint channelId = BinaryPrimitives.ReadUInt32BigEndian(header[16..]);
-
         switch (type)
         {
             case FrameType.Hello:
@@ -60,14 +54,14 @@ public static class FrameCodec
             throw new ProtocolException("Heartbeat payloads must contain exactly eight bytes.");
         if (type == FrameType.EndStream && length != 0)
             throw new ProtocolException("END_STREAM must have an empty payload.");
+        if (type == FrameType.Data && length is 0 or > 65536)
+            throw new ProtocolException("DATA payload must contain 1..65536 bytes.");
         if (type is not (FrameType.Ping or FrameType.Pong or FrameType.EndStream or FrameType.Data) && length == 0)
             throw new ProtocolException("Control frames require a JSON payload.");
         return new FrameHeader((int)length, type, exchangeId, channelId);
     }
 
-    public static ValueTask<Frame?> ReadAsync(Stream stream, CancellationToken cancellationToken = default)
-        => ReadAsync(stream, MaxPayloadBytes, cancellationToken);
-
+    public static ValueTask<Frame?> ReadAsync(Stream stream, CancellationToken cancellationToken = default) => ReadAsync(stream, MaxPayloadBytes, cancellationToken);
     public static async ValueTask<Frame?> ReadAsync(Stream stream, int maxPayloadBytes, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(stream);

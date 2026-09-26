@@ -1,32 +1,50 @@
 # Mainframe v1 wire protocol design
 
-Status: approved v1 design target with an initial unary subset implemented. This
-document expands the resolved decisions in [plan.md](plan.md). The frame format
-and message assignments below are selected for v1. JSON examples illustrate the
-contracts; the implemented subset's schema and wire fixture are in `docs/protocol`.
+Status: approved v1 design with the Windows-local execution subset implemented.
+The rest of v1 remains a target. See [plan.md](plan.md) for milestone boundaries
+and `docs/protocol` for implemented schemas and golden wire fixtures.
 
 ## Implemented Windows-local subset
 
-The first milestone implements the frame codec, strict JSON controls, TLS 1.3 mTLS,
-HELLO/WELCOME, unary REQUEST/RESPONSE, PING/PONG, and GOAWAY. It negotiates only the
-`unary-rpc` feature and `terminal` role; WELCOME reports `authenticated`. The server
-listens on IPv4 loopback only. Local initialization provisions the initial operator;
-network AUTH enrollment and program bootstrap are not implemented yet.
+The host listens on IPv4 loopback with TLS 1.3. Operator connections use mTLS and
+the `terminal` role. The `program` role uses server-authenticated TLS, followed by
+restricted AUTH using a single-use inherited-pipe credential. Anonymous clients
+cannot dispatch requests; enrollment and peers remain unavailable.
 
-Implemented syscalls are `kernel.describe`, `kernel.health`, and
-`kernel.capabilities`, all version 1 with an empty arguments object. The client
-serializes calls with 10-second deadlines and never retries. Server unary handlers
-run serially, accept optional request timeouts of 1..30,000 ms, and emit only final
-responses. The server rechecks operator authorization on every frame and idle tick.
+The connector requires `unary-rpc` and offers `streaming-v1`, `execution-v1`, and
+`shell-v1`. WELCOME selects only offered features. Unary clients remain compatible.
+The kernel implements the three kernel queries plus program registration/list/removal,
+host-root administration, shell open/command, and process start/resize/interrupt.
+See the [implemented contracts](docs/protocol/README.md) for argument/result types.
 
-The host limits connections to 32, TLS handshakes to 8, and unary exchanges to
-4,096 per connection. Request IDs must be increasing odd integers; a high-water
-mark rejects reuse. Late CANCEL for a completed unary exchange is harmless. Stream
-frames are rejected; stream windows and terminal-exchange stream records below are
-future work, not claims of implemented behavior. Negotiated frames must be between
-1 KiB and 1 MiB. No process, storage, peer delegation, or public network acceptance
-is advertised. Shutdown of this subset closes connections; a full streaming drain
-will accompany streaming support. Linux execution remains unverified.
+Connections multiplex up to 128 exchanges with increasing odd connector IDs;
+acceptor-originated IDs use even numbers. No operation is replayed. Ordinary client
+calls and process launches have a ten-second deadline; accepted programs continue
+until exit, cancellation, lost authorization, or detected session loss. Network
+loss can leave an uncertain outcome. Shutdown sends GOAWAY and drains for up to ten
+seconds before connection cleanup and process termination.
+
+DATA, WINDOW_UPDATE, END_STREAM, CANCEL, and COMPLETE are implemented. Receive
+windows reserve 64 KiB each from a 6 MiB pool. Outgoing DATA reserves capacity from
+a separate 6 MiB pool before copying; controls and pending request payloads each
+have a 1 MiB bound. The remaining connection allowance covers current frame/JSON
+processing. These are payload budgets; managed object overhead is separate.
+When receive capacity is unavailable, the channel stays at zero credit. Outgoing
+DATA waits for buffer capacity and is scheduled fairly; controls have priority.
+
+A connection retains at most 4,096 exchange records. Completed records retain
+channel direction, remaining credit, and EOF state rather than response payloads.
+Late authorized DATA is discarded without delivery; excess credit or illegal
+transitions close the connection. Queued input is dropped after completion.
+Exhausting server bookkeeping sends GOAWAY and closes the connection. IDs are never
+reused. The host also bounds connections to 32 and concurrent TLS handshakes to 8.
+Negotiated frame sizes range from 1 KiB to 1 MiB.
+
+Local certificate maintenance requires the stopped-host state lock and uses a
+recoverable journal. It renews only unexpired, unrevoked credentials in their final
+24 hours. This is separate from future network enrollment and renewal.
+Linux execution, storage RPCs, peer leases, and public endpoint acceptance remain
+unimplemented and unverified.
 
 ## Transport and encryption
 
@@ -167,7 +185,7 @@ HELLO example:
   "optionalFeatures": [],
   "requiredFeatures": [],
   "role": "terminal",
-  "clientName": "mf",
+  "clientName": "mframe",
   "maxFrameBytes": 1048576
 }
 ```
@@ -238,7 +256,7 @@ Foreground cleanup starts at detected loss; silent loss is not detected instantl
 
 ## Requests and results
 
-Example REQUEST for `fs.open`:
+Planned storage REQUEST for `fs.open` (not currently implemented):
 
 ```json
 {
@@ -247,7 +265,9 @@ Example REQUEST for `fs.open`:
   "timeoutMs": 5000,
   "arguments": {
     "path": "/vol/documents/report.txt",
-    "access": "read"
+    "access": "read",
+    "mode": "open-existing",
+    "share": ["read"]
   }
 }
 ```
@@ -306,14 +326,16 @@ REQUEST:
   "arguments": {
     "program": "cat",
     "argv": ["/vol/documents/report.txt"],
-    "workingDirectory": "/",
+    "sessionId": "opaque-shell-id",
     "ioMode": "pipes"
   }
 }
 ```
 
-Arguments are an array. Execution of a shell command string is a separate explicit
-operation, not implicit quoting or concatenation by `process.start`.
+Arguments are an array. Optional `sessionId` selects a connection-owned shell working
+directory; without it, the manifest supplies the host directory. `shell.command`
+parses the deliberately small Mainframe shell language. No operation implicitly
+evaluates an OS shell command string.
 
 Streaming RESPONSE:
 
@@ -362,7 +384,7 @@ Specify bounded handling of already-in-flight input during completion/cancellati
 using the terminal-exchange rules below. Rejected requests have no streams or COMPLETE.
 
 Pipe mode preserves exact bytes and separate stdout/stderr. Terminal mode uses a
-combined output channel, implemented with Windows ConPTY and Linux PTYs. Carry
+combined output channel, implemented locally with Windows ConPTY; Linux PTYs remain pending. Carry
 initial dimensions and forward resize, EOF, and interrupts. Restore client terminal
 settings on every exit. Resize and process signals are explicit operations; CANCEL
 requests operation cancellation and is not a universal substitute for every signal.
@@ -379,7 +401,66 @@ interpreters, I/O modes, and requested permissions. Never turn argv into an impl
 host-shell command. Shell v1 supports quoted arguments and working-directory changes,
 not pipelines, redirection, expansion, or implicit host-shell evaluation.
 
-## File streaming
+## Local encrypted-storage protocol (planned)
+
+The next milestone is [local encrypted volumes](plan.md#next-milestone-local-encrypted-volumes).
+This section defines planned method-version-1 contracts, not currently accepted
+messages. Retain the 20-byte frame header, TLS, existing channel state machine,
+limits, cancellation, and completed-exchange bookkeeping. Negotiate the explicit
+`storage-v1` feature before dispatching storage calls. Do not advertise it until
+all corresponding contracts and tests exist. A missing feature is an explicit
+unsupported response, not fallback to host filesystem access.
+
+| Methods | Contract outline |
+| --- | --- |
+| `volume.create` | Absolute local container path and sensitive password; returns volume UUID; leaves it unmounted |
+| `volume.mount` | Existing local path, `/vol/<name>`, sensitive password; returns UUID, generation, and capabilities |
+| `volume.list` | Bounded configured mount records, state, UUID, and provider capabilities; never key material |
+| `volume.unmount` | Mount path; refuses busy volumes; flushes/checkpoints/closes before success |
+| `fs.list` | Virtual path, requested batch size, opaque bounded continuation token; returns entries and next token |
+| `fs.stat` | Virtual path; returns type, length, and timestamps |
+| `fs.mkdir`, `fs.delete` | Virtual path; empty-only directory deletion, no recursive delete |
+| `fs.rename` | Source, destination, explicit replace flag; atomic same-volume publication |
+| `fs.open` | Virtual path, access, create mode, read/write/delete sharing flags; returns opaque handle and metadata |
+| `fs.read`, `fs.write` | Handle, explicit offset, bounded length; one binary data channel |
+| `fs.truncate` | Handle and new length |
+| `fs.flush`, `fs.close` | Handle; distinct durability and lifetime operations |
+
+Control messages use explicit JSON contracts with required fields, duplicate-name
+rejection, and optional-field evolution. Encode all file lengths, offsets, and
+actual byte counts as decimal strings in the nonnegative signed 64-bit range.
+Batch sizes and ordinary bounded counts remain JSON numbers. Open modes are
+`open-existing`, `create-new`, `open-or-create`, and `truncate-existing`; access is
+`read`, `write`, or `read-write`. Validate incompatible mode/access combinations.
+Mutation responses report committed status where applicable; storage COMPLETE
+results have storage-specific contracts, not process exit codes.
+
+Create/mount requests contain a sensitive `password` field, at most 1,024 UTF-8
+bytes. They are operator-only over authenticated TLS. Disable payload logging and
+redact before JSON/error diagnostics; never echo the field, include it in audit
+records, or deliver it to a program session. Prompt input remains separate from
+foreground program I/O. Password-bearing requests have no replay/idempotent retry.
+Use dedicated bounded KDF admission (two concurrent per host), operator/global
+unlock throttles, and return busy without retaining password-bearing queues.
+A timed-out create/mount may already have committed; inspect state manually before
+retrying. Generic unlock failures must not claim to distinguish wrong passwords
+from damaged encrypted headers. Keys never travel with ordinary file operations.
+
+Authorization is based on `volume.manage` for operator-only administration and
+`volume:<uuid>:read`/`volume:<uuid>:write` for file operations, with the live lease
+and frozen program permission intersection. A path or supplied identity is not an
+authorization grant. Handles bind connection, caller, volume, and mount/host
+generations. They are invalid after connection loss, execution end, lease expiry,
+or restart. Mount state is local; peer leases and owner routing remain deferred.
+
+Name resolution, local resource limits, mount lifecycle, journal handling, and
+provider capabilities are specified in plan.md. Storage errors must distinguish
+locked/unavailable/busy volumes, access/sharing denials, invalid/stale handles,
+invalid names, missing/existing files, disk full, corruption, unsupported formats,
+and I/O failures. Versioned schemas will assign exact error codes before coding
+handlers. Retry advice never authorizes automatic mutation replay.
+
+## File streaming (planned)
 
 Use raw DATA rather than JSON/base64 for file bytes. Example request:
 
@@ -398,11 +479,23 @@ Use raw DATA rather than JSON/base64 for file bytes. Example request:
 The RESPONSE declares a responder-to-requester data channel. After receiving
 credit, the server sends DATA, END_STREAM, then COMPLETE with actual byte count
 and end-of-file status. Write requests use a requester-to-responder channel and
-complete after SQLite commit for managed volumes or OS acceptance for host-directory
-volumes. An explicit `fs.flush` requests durable flushing; close is not flush.
+complete after the encrypted SQLite FULL commit for managed volumes. The later
+host-directory provider will acknowledge OS acceptance. An explicit `fs.flush` requests durable flushing; close is not flush.
 Provider capabilities declare these semantics. A partial
 stream followed by connection loss must not be reported as a successful full read
 or write.
+
+For this milestone, both read and write requests are limited to 65,536 bytes.
+The SDK splits larger operations. The read RESPONSE declares channel 1 with the
+responder as sender; write declares channel 1 with the requester as sender. A
+zero-length operation may complete as a unary response. For a nonempty write,
+reserve bounded capacity, then grant credit. Require exactly the declared number
+of bytes followed by END_STREAM before beginning the transaction. Short/overlong
+input fails without a partial transaction. COMPLETE reports `bytesWritten` only
+after commit. Reads report `bytesRead` and `eof` after DATA and END_STREAM. EOF
+means the requested range reached the committed file end, including zero-byte reads.
+Flush and metadata operations are unary. A lost COMPLETE can leave a committed
+write with an unknown outcome; cancellation cannot undo an acknowledged commit.
 
 Each bounded managed write is atomic; a multi-request upload is not. Use a temporary
 file and atomic same-volume rename/replace to publish a complete file. Cross-volume

@@ -13,7 +13,7 @@ public sealed class ProtocolTests
     public async Task HelloMatchesPublishedWireFixture()
     {
         string fixture = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Fixtures", "hello-v1.hex"));
-        var hello = new HelloRequest([1], [], ["unary-rpc"], "terminal", "mf", FrameCodec.MaxPayloadBytes);
+        var hello = new HelloRequest([1], [], ["unary-rpc"], "terminal", "mframe", FrameCodec.MaxPayloadBytes);
         using var stream = new MemoryStream();
         await FrameCodec.WriteAsync(stream, new Frame(FrameType.Hello, 0, 0, ProtocolJson.Serialize(hello)));
         Assert.Equal(fixture.Trim(), Convert.ToHexString(stream.ToArray()));
@@ -98,7 +98,7 @@ public sealed class ProtocolTests
     [Fact]
     public void JsonUsesCamelCaseAndExplicitContracts()
     {
-        var hello = new HelloRequest([1], [], ["unary-rpc"], "terminal", "mf", FrameCodec.MaxPayloadBytes);
+        var hello = new HelloRequest([1], [], ["unary-rpc"], "terminal", "mframe", FrameCodec.MaxPayloadBytes);
         byte[] bytes = ProtocolJson.Serialize(hello);
         Assert.Contains("\"maxFrameBytes\":1048576", Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
         HelloRequest decoded = ProtocolJson.Deserialize<HelloRequest>(bytes);
@@ -115,13 +115,11 @@ public sealed class ProtocolTests
     [InlineData("{\"method\":\"kernel.health\",\"version\":1,\"arguments\":null}")]
     [InlineData("{\"method\":\"kernel.health\",\"version\":1,\"timeoutMs\":0,\"arguments\":{}}")]
     [InlineData("{\"method\":\"kernel.health\",\"version\":1,\"arguments\":{}")]
-    public void MalformedOrIncompleteRequestsAreRejected(string json)
-        => Assert.Throws<ProtocolException>(() => ProtocolJson.Deserialize<RpcRequest>(Encoding.UTF8.GetBytes(json)));
-
+    public void MalformedOrIncompleteRequestsAreRejected(string json) => Assert.Throws<ProtocolException>(() => ProtocolJson.Deserialize<RpcRequest>(Encoding.UTF8.GetBytes(json)));
     [Fact]
     public void AdditiveFieldsAreAllowedWithoutTypeActivation()
     {
-        var request = ProtocolJson.Deserialize<RpcRequest>("{\"method\":\"kernel.health\",\"version\":1,\"arguments\":{},\"futureField\":{\"$type\":\"anything\"}}"u8.ToArray());
+        RpcRequest request = ProtocolJson.Deserialize<RpcRequest>("{\"method\":\"kernel.health\",\"version\":1,\"arguments\":{},\"futureField\":{\"$type\":\"anything\"}}"u8.ToArray());
         Assert.Equal("kernel.health", request.Method);
     }
 
@@ -146,9 +144,7 @@ public sealed class ProtocolTests
     [InlineData("{\"ok\":false,\"result\":{}}")]
     [InlineData("{\"ok\":true,\"result\":{},\"error\":{\"code\":\"X\",\"message\":\"X\",\"outcome\":\"unknown\"}}")]
     [InlineData("{\"ok\":false,\"error\":{\"code\":\"X\",\"message\":\"X\",\"outcome\":\"invented\"}}")]
-    public void InconsistentResponsesAreRejected(string json)
-        => Assert.Throws<ProtocolException>(() => ProtocolJson.Deserialize<RpcResponse>(Encoding.UTF8.GetBytes(json)));
-
+    public void InconsistentResponsesAreRejected(string json) => Assert.Throws<ProtocolException>(() => ProtocolJson.Deserialize<RpcResponse>(Encoding.UTF8.GetBytes(json)));
     private static byte[] Header(FrameType type, ulong exchange, uint channel, uint length)
     {
         byte[] header = new byte[20];
@@ -159,9 +155,27 @@ public sealed class ProtocolTests
         return header;
     }
 
+    [Theory]
+    [InlineData("window-update-v1.hex", FrameType.WindowUpdate)]
+    [InlineData("process-start-v1.hex", FrameType.Request)]
+    [InlineData("complete-v1.hex", FrameType.Complete)]
+    public async Task ExecutionWireFixturesMatchContracts(string fixture, FrameType type)
+    {
+        object payload = type switch
+        {
+            FrameType.WindowUpdate => new WindowCredit(65536),
+            FrameType.Request => new RpcRequest("process.start", 1, 10000, ProtocolJson.ToElement(new ProcessStartRequest("hello", ["Alice"]))),
+            _ => new RpcResponse(true, false, ProtocolJson.ToElement(new ProcessExited(7)), null)
+        };
+        var frame = new Frame(type, 17, type == FrameType.WindowUpdate ? 1u : 0u, ProtocolJson.Serialize(payload));
+        using var stream = new MemoryStream();
+        await FrameCodec.WriteAsync(stream, frame);
+        string hex = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", fixture));
+        Assert.Equal(Convert.FromHexString(string.Concat(hex.Where(c => !char.IsWhiteSpace(c)))), stream.ToArray());
+    }
+
     private sealed class FragmentedStream(byte[] bytes, int chunkSize) : MemoryStream(bytes)
     {
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
-            => base.ReadAsync(buffer[..Math.Min(buffer.Length, chunkSize)], cancellationToken);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => base.ReadAsync(buffer[..Math.Min(buffer.Length, chunkSize)], cancellationToken);
     }
 }

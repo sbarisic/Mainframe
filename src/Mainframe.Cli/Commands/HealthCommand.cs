@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Mainframe.Cli.Commands;
 
 public sealed class HealthCommand : KernelCommand
@@ -7,7 +9,7 @@ public sealed class HealthCommand : KernelCommand
 
     protected override async Task ExecuteConnectedAsync(KernelConnection connection, CommandContext context, CancellationToken cancellationToken)
     {
-        var health = await connection.Client.CallAsync("kernel.health", null, cancellationToken);
+        JsonElement health = await connection.Client.CallAsync("kernel.health", null, cancellationToken);
         if (context.Json)
             context.WriteJson(health);
         else

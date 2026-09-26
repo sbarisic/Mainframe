@@ -10,7 +10,6 @@ internal static class PrivateStateDirectory
     {
         if (Directory.Exists(directory) || File.Exists(directory))
             throw new IOException("The state directory already exists.");
-
         if (OperatingSystem.IsWindows())
             CreateWindows(directory);
         else
@@ -21,12 +20,10 @@ internal static class PrivateStateDirectory
     {
         RejectLinks(directory);
         if (!Directory.Exists(directory))
-            throw new DirectoryNotFoundException("The kernel is not initialized. Run 'mf cluster init' first.");
-
+            throw new DirectoryNotFoundException("The kernel is not initialized. Run 'mframe cluster init' first.");
         if (OperatingSystem.IsWindows())
             ValidateWindows(directory);
-        else if ((File.GetUnixFileMode(directory) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite |
-                UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0)
+        else if ((File.GetUnixFileMode(directory) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0)
             throw new UnauthorizedAccessException("The kernel state directory must be accessible only to its owner.");
     }
 
@@ -48,8 +45,7 @@ internal static class PrivateStateDirectory
             throw new IOException("Kernel state files must not be symbolic links or reparse points.");
         if (OperatingSystem.IsWindows())
             ValidateWindowsFile(path);
-        else if ((File.GetUnixFileMode(path) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite |
-                UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0)
+        else if ((File.GetUnixFileMode(path) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0)
             throw new UnauthorizedAccessException("Kernel state files must be accessible only to their owner.");
         return path;
     }
@@ -67,35 +63,32 @@ internal static class PrivateStateDirectory
     [SupportedOSPlatform("windows")]
     private static void CreateWindows(string directory)
     {
-        var currentUser = WindowsIdentity.GetCurrent().User
-            ?? throw new UnauthorizedAccessException("Cannot identify the local Windows account.");
+        SecurityIdentifier currentUser = WindowsIdentity.GetCurrent().User ?? throw new UnauthorizedAccessException("Cannot identify the local Windows account.");
         var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
         var security = new DirectorySecurity();
         security.SetOwner(currentUser);
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        foreach (var identity in new[] { currentUser, system }.Distinct())
-            security.AddAccessRule(new FileSystemAccessRule(identity, FileSystemRights.FullControl,
-                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+        foreach (SecurityIdentifier? identity in new[]
+        {
+            currentUser,
+            system
+        }.Distinct())
+            security.AddAccessRule(new FileSystemAccessRule(identity, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
         new DirectoryInfo(directory).Create(security);
     }
 
     [SupportedOSPlatform("windows")]
-    private static void ValidateWindows(string directory) =>
-        ValidateWindowsRules(new DirectoryInfo(directory).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner));
-
+    private static void ValidateWindows(string directory) => ValidateWindowsRules(new DirectoryInfo(directory).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner));
     [SupportedOSPlatform("windows")]
-    private static void ValidateWindowsFile(string path) =>
-        ValidateWindowsRules(new FileInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner));
-
+    private static void ValidateWindowsFile(string path) => ValidateWindowsRules(new FileInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner));
     [SupportedOSPlatform("windows")]
     private static void ValidateWindowsRules(FileSystemSecurity security)
     {
-        var currentUser = WindowsIdentity.GetCurrent().User
-            ?? throw new UnauthorizedAccessException("Cannot identify the local Windows account.");
+        SecurityIdentifier currentUser = WindowsIdentity.GetCurrent().User ?? throw new UnauthorizedAccessException("Cannot identify the local Windows account.");
         var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
         if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner || (owner != currentUser && owner != system))
             throw new UnauthorizedAccessException("Kernel state must be owned by the current Windows account or SYSTEM.");
-        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier));
+        AuthorizationRuleCollection rules = security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier));
         if (rules.Count == 0)
             throw new UnauthorizedAccessException("Kernel state requires an explicit private access policy.");
         foreach (FileSystemAccessRule rule in rules)

@@ -4,26 +4,16 @@ using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 
 namespace Mainframe.Protocol;
-
 /// <summary>Strict portable JSON controls, using only registered serialization contracts.</summary>
 public static class ProtocolJson
 {
     public const int MaxDepth = 32;
-    private static readonly ProtocolJsonContext Context = new(new JsonSerializerOptions
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        MaxDepth = MaxDepth,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        RespectNullableAnnotations = true
-    });
-
+    private static readonly ProtocolJsonContext Context = new(new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, MaxDepth = MaxDepth, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull, RespectNullableAnnotations = true });
     public static byte[] Serialize<T>(T value)
     {
         if (value is null)
             return "null"u8.ToArray();
-        byte[] bytes = value is JsonNode node
-            ? JsonSerializer.SerializeToUtf8Bytes(node, Context.JsonNode)
-            : JsonSerializer.SerializeToUtf8Bytes(value, GetTypeInfo(value.GetType()));
+        byte[] bytes = value is JsonNode node ? JsonSerializer.SerializeToUtf8Bytes(node, Context.JsonNode) : JsonSerializer.SerializeToUtf8Bytes(value, GetTypeInfo(value.GetType()));
         if (bytes.Length > FrameCodec.MaxPayloadBytes)
             throw new ProtocolException("JSON payload exceeds the frame limit.");
         return bytes;
@@ -55,6 +45,7 @@ public static class ProtocolJson
                 throw new ProtocolException("Undefined JSON is not a valid argument.");
             return element.Clone();
         }
+
         byte[] bytes = Serialize(value);
         ValidateJson(bytes);
         using JsonDocument document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = MaxDepth });
@@ -87,6 +78,7 @@ public static class ProtocolJson
                         break;
                 }
             }
+
             if (!any || reader.CurrentDepth != 0)
                 throw new ProtocolException("A complete JSON value is required.");
         }
@@ -96,9 +88,7 @@ public static class ProtocolJson
         }
     }
 
-    private static JsonTypeInfo GetTypeInfo(Type type)
-        => Context.GetTypeInfo(type) ?? throw new NotSupportedException($"No explicit wire serialization contract is registered for {type.Name}. Supply JsonElement or JsonNode for application arguments.");
-
+    private static JsonTypeInfo GetTypeInfo(Type type) => Context.GetTypeInfo(type) ?? throw new NotSupportedException($"No explicit wire serialization contract is registered for {type.Name}. Supply JsonElement or JsonNode for application arguments.");
     private static void ValidateContract<T>(T value)
     {
         switch (value)
@@ -158,6 +148,24 @@ public static class ProtocolJson
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(HelloRequest))]
+[JsonSerializable(typeof(ProgramManifest))]
+[JsonSerializable(typeof(ProgramRegistration))]
+[JsonSerializable(typeof(ProgramRegistration[]))]
+[JsonSerializable(typeof(RegisterProgramRequest))]
+[JsonSerializable(typeof(SelectorRequest))]
+[JsonSerializable(typeof(HostRoot))]
+[JsonSerializable(typeof(HostRoot[]))]
+[JsonSerializable(typeof(ProcessStartRequest))]
+[JsonSerializable(typeof(ProcessControlRequest))]
+[JsonSerializable(typeof(ShellCommandRequest))]
+[JsonSerializable(typeof(ShellState))]
+[JsonSerializable(typeof(ProcessStarted))]
+[JsonSerializable(typeof(ProcessExited))]
+[JsonSerializable(typeof(WindowCredit))]
+[JsonSerializable(typeof(BootstrapCredential))]
+[JsonSerializable(typeof(BootstrapAuth))]
+[JsonSerializable(typeof(AuthenticationResult))]
+[JsonSerializable(typeof(EmptyArguments))]
 [JsonSerializable(typeof(WelcomeResponse))]
 [JsonSerializable(typeof(RpcRequest))]
 [JsonSerializable(typeof(RpcResponse))]

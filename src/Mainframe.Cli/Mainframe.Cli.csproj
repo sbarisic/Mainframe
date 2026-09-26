@@ -5,11 +5,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <AssemblyName>mf</AssemblyName>
+    <AssemblyName>mframe</AssemblyName>
     <RootNamespace>Mainframe.Cli</RootNamespace>
     <Version>0.1.0</Version>
     <PackAsTool>true</PackAsTool>
-    <ToolCommandName>mf</ToolCommandName>
+    <ToolCommandName>mframe</ToolCommandName>
     <PackageId>Mainframe.Cli</PackageId>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>

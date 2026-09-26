@@ -1,0 +1,405 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mainframe:protocol:execution-v1",
+  "title": "Mainframe Windows execution v1 contracts",
+  "$defs": {
+    "manifest": {
+      "type": "object",
+      "required": [
+        "manifestVersion",
+        "identity",
+        "version",
+        "executable",
+        "fixedArguments",
+        "workingDirectory",
+        "operatingSystems",
+        "architectures",
+        "ioModes",
+        "environmentAllowlist",
+        "permissions",
+        "hostRoots"
+      ],
+      "properties": {
+        "manifestVersion": {
+          "const": 1
+        },
+        "identity": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_.-]*/[a-z][a-z0-9_.-]*$"
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "executable": {
+          "type": "string"
+        },
+        "interpreter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workingDirectory": {
+          "type": "string"
+        },
+        "fixedArguments": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "operatingSystems": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "architectures": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "ioModes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "enum": [
+              "pipes",
+              "terminal"
+            ]
+          }
+        },
+        "environmentAllowlist": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "permissions": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "enum": [
+              "kernel.describe",
+              "kernel.health",
+              "kernel.capabilities"
+            ]
+          }
+        },
+        "hostRoots": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "runtime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "description": "UTF-8 manifest is at most 4096 bytes. Runtime also validates semantic versions, absolute paths, environment names, and host-root names. Unknown fields are ignored."
+    },
+    "register": {
+      "type": "object",
+      "required": [
+        "manifest"
+      ],
+      "properties": {
+        "manifest": {
+          "$ref": "#/$defs/manifest"
+        }
+      }
+    },
+    "selector": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "root": {
+      "type": "object",
+      "required": [
+        "name",
+        "path"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "start": {
+      "type": "object",
+      "required": [
+        "program",
+        "argv"
+      ],
+      "properties": {
+        "program": {
+          "type": "string"
+        },
+        "argv": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "string"
+          }
+        },
+        "ioMode": {
+          "enum": [
+            "pipes",
+            "terminal"
+          ],
+          "default": "pipes"
+        },
+        "sessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32767,
+          "default": 80
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32767,
+          "default": 25
+        }
+      }
+    },
+    "control": {
+      "type": "object",
+      "required": [
+        "processId"
+      ],
+      "properties": {
+        "processId": {
+          "type": "string"
+        },
+        "signal": {
+          "enum": [
+            "interrupt",
+            null
+          ]
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32767,
+          "default": 80
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32767,
+          "default": 25
+        }
+      }
+    },
+    "shellCommand": {
+      "type": "object",
+      "required": [
+        "sessionId",
+        "line"
+      ],
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "line": {
+          "type": "string",
+          "maxLength": 32767
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32767,
+          "default": 80
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32767,
+          "default": 25
+        }
+      }
+    },
+    "shellState": {
+      "type": "object",
+      "required": [
+        "sessionId",
+        "workingDirectory"
+      ],
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "workingDirectory": {
+          "type": "string"
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "closed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "channel": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "sender"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "name": {
+          "type": "string"
+        },
+        "sender": {
+          "enum": [
+            "requester",
+            "responder"
+          ]
+        }
+      }
+    },
+    "started": {
+      "type": "object",
+      "required": [
+        "processId",
+        "channels"
+      ],
+      "properties": {
+        "processId": {
+          "type": "string"
+        },
+        "channels": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/channel"
+          }
+        }
+      }
+    },
+    "exited": {
+      "type": "object",
+      "required": [
+        "exitCode"
+      ],
+      "properties": {
+        "exitCode": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "cancelled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "windowUpdate": {
+      "type": "object",
+      "required": [
+        "bytes"
+      ],
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "required": [
+        "token"
+      ],
+      "properties": {
+        "token": {
+          "type": "string",
+          "pattern": "^[0-9A-F]{64}$"
+        }
+      }
+    },
+    "authResult": {
+      "type": "object",
+      "required": [
+        "ok"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        }
+      }
+    },
+    "bootstrap": {
+      "type": "object",
+      "required": [
+        "token",
+        "host",
+        "port",
+        "caCertificate"
+      ],
+      "properties": {
+        "token": {
+          "type": "string",
+          "pattern": "^[0-9A-F]{64}$"
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "caCertificate": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

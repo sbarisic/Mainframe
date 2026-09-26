@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Mainframe.Cli.Commands;
 
 public sealed class StatusCommand : KernelCommand
@@ -7,8 +9,8 @@ public sealed class StatusCommand : KernelCommand
 
     protected override async Task ExecuteConnectedAsync(KernelConnection connection, CommandContext context, CancellationToken cancellationToken)
     {
-        var description = await connection.Client.CallAsync("kernel.describe", null, cancellationToken);
-        var health = await connection.Client.CallAsync("kernel.health", null, cancellationToken);
+        JsonElement description = await connection.Client.CallAsync("kernel.describe", null, cancellationToken);
+        JsonElement health = await connection.Client.CallAsync("kernel.health", null, cancellationToken);
         if (context.Json)
         {
             context.WriteJson(new { endpoint = connection.Endpoint.Display, description, health });

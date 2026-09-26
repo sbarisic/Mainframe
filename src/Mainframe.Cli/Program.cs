@@ -1,24 +1,38 @@
-using Mainframe.Cli;
 using Mainframe.Cli.Commands;
 
-using var cancellation = new CancellationTokenSource();
-ConsoleCancelEventHandler onCancel = (_, e) =>
+namespace Mainframe.Cli;
+
+internal static class Program
 {
-    e.Cancel = true;
-    cancellation.Cancel();
-};
-Console.CancelKeyPress += onCancel;
-try
-{
-    return await new CommandRouter([
-        new ClusterCommand(),
-        new StatusCommand(),
-        new HealthCommand(),
-        new CapabilitiesCommand(),
-        new VersionCommand()
-    ]).RunAsync(args, Console.Out, Console.Error, cancellation.Token);
-}
-finally
-{
-    Console.CancelKeyPress -= onCancel;
+    private static async Task<int> Main(string[] args)
+    {
+        using var cancellation = new CancellationTokenSource();
+        ConsoleCancelEventHandler onCancel = (_, e) =>
+        {
+            e.Cancel = true;
+            cancellation.Cancel();
+        };
+        Console.CancelKeyPress += onCancel;
+        try
+        {
+            var router = new CommandRouter(
+            [
+                new ClusterCommand(),
+                new StatusCommand(),
+                new HealthCommand(),
+                new CapabilitiesCommand(),
+                new ProgramCommand(),
+                new HostRootCommand(),
+                new ExecCommand(),
+                new ConnectCommand(),
+                new VersionCommand()
+            ]);
+
+            return await router.RunAsync(args, Console.Out, Console.Error, cancellation.Token);
+        }
+        finally
+        {
+            Console.CancelKeyPress -= onCancel;
+        }
+    }
 }

@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <!-- One runnable directory per configuration/framework. Keep obj project-local. -->
+    <BaseOutputPath>$(MSBuildThisFileDirectory)bin/</BaseOutputPath>
+  </PropertyGroup>
+</Project>
