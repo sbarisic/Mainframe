@@ -314,8 +314,8 @@ validated and is not claimed as supported by this milestone.
 Mainframe is licensed under the [MIT License](LICENSE).
 The CLI package includes the license and declares MIT in its NuGet metadata.
 
-WinFsp is a candidate for the future Windows filesystem adapter; it is not a
-dependency of the current CLI. Its [GPLv3 license with a FLOSS exception](https://github.com/winfsp/winfsp/blob/master/License.txt)
+WinFsp is used by the separate Windows adapter; it is not a
+dependency of the main CLI. Its [GPLv3 license with a FLOSS exception](https://github.com/winfsp/winfsp/blob/v2.1/License.txt)
 allows qualifying open-source applications to link to its specified DLLs without
 adopting GPLv3. The exception requires attribution in the user interface and
 user-facing documentation, and prohibits linking or distributing the software
@@ -362,9 +362,79 @@ sharing and locks, while final disposal closes the object.
 `KernelClient.ConnectFilesystemAsync` uses an operator certificate with a restricted
 filesystem role. It cannot execute programs or administer volumes. Negotiated
 exchange retirement allows connections to outlive 4,096 calls without reconnecting
-or replaying mutations. This is backend preparation only: no WinFsp installation,
-Windows drive, Explorer integration, or filesystem navigation in the shell is added.
+or replaying mutations. The Windows adapter is described below; filesystem
+navigation in the mainframe shell remains separate work.
 The final Release suite passes 186 tests, including isolated host crash recovery and
 a 257 MiB read after 10,050 queries on one connection. See
 [the backend acceptance record](plan.md#virtual-root-and-writable-backend-september-2026)
-for build/test evidence and the remaining adapter work.
+for backend build/test evidence and the subsequent adapter acceptance record.
+
+## Windows drive and directory adapter
+
+`mframe-fs` is a separate foreground Windows x64 application. Install the official
+WinFsp **2.1.25156** release with its .NET binding. The adapter finds WinFsp through
+the installation registry and refuses other, unqualified versions. It does not
+install drivers, store volume passwords, or load SQLCipher.
+
+```powershell
+dotnet build src/Mainframe.WinFsp
+./bin/Debug/net10.0/mframe-fs.exe mount M:
+# Or expose only one volume:
+./bin/Debug/net10.0/mframe-fs.exe mount M: --root /vol/documents
+# The final directory must not exist; its parent must exist:
+./bin/Debug/net10.0/mframe-fs.exe mount C:\Mounts\Mainframe
+```
+
+Start the kernel and unlock containers using `mframe volume mount` first. An export
+of `/` shows `M:\vol\documents`; locked volumes are listed but cannot be opened.
+`--root` defaults to `/`. `--state DIR` and `--endpoint HOST:PORT` use the same
+local credentials and loopback endpoint conventions as `mframe`. Run as the same
+user and elevation level as the applications that will access the drive. Mount
+points and synthetic security descriptors restrict access to that user and SYSTEM.
+ACL editing is unsupported; Mainframe volume grants remain authoritative.
+Directory mounts beneath `%TEMP%` are rejected: on the qualified Windows system,
+directory creation there falsely succeeds without reaching the filesystem, also
+reproduced using the official WinFsp sample. Use a drive letter or a directory
+outside `%TEMP%`, such as `C:\Mounts\Mainframe`. Spaces in mount paths are supported.
+
+Keep the command running. Ctrl+C drains operations and unmounts. A disconnected
+kernel causes unmount and a nonzero exit; restart the command to reconnect. Failed
+mutations are never replayed. Unmount the Windows export before unmounting its
+encrypted volume. Preserve container recovery sidecars after an unexpected stop.
+
+The adapter supports file and directory creation, copying, seeking, truncation,
+timestamps, supported attributes, rename/replacement, and deletion. Namespace and
+volume roots are immutable. Transfers use bounded 64 KiB RPC chunks, so a large
+write or append is not one atomic transaction. Use temporary-file replacement to
+publish complete files. Alternate streams, links/reparse points, persistent ACLs,
+compression, Windows sparse controls, and cross-volume rename are unsupported.
+
+**Concurrent SDK access has limited guarantees.** Windows sharing and byte-range
+locks coordinate applications on the same mount, but are not propagated to SDK
+clients or other mounts. SDK locks are checked when Windows I/O reaches the
+backend. Windows caching can delay visibility and conflict with concurrent SDK
+edits. Close and reopen files to refresh; external SDK changes do not generate
+Explorer notifications. Do not rely on this export for cross-client database
+locking or simultaneous editing of the same file.
+
+To publish only the adapter, with the client/protocol libraries:
+
+```powershell
+dotnet publish src/Mainframe.WinFsp -c Release -o artifacts/winfsp-publish
+```
+
+WinFsp remains an installed prerequisite. Build-time discovery can be overridden
+with `-p:WinFspInstallDir="C:\path\to\WinFsp"`. The main solution's host tests also
+require SQLCipher. On Visual Studio 2026 with MSVC 14.51.36231:
+
+```powershell
+./native/build.ps1 -VsInstall 'C:\Program Files\Microsoft Visual Studio\18\Community' -VcToolsVersion 14.51.36231
+dotnet test tests/Mainframe.WinFsp.Tests -c Release
+```
+
+The separate mount suite requires the actual driver and fails explicitly if its
+prerequisites are absent. It uses temporary kernel state, encrypted volumes, and
+mounts. See `plan.md` for the acceptance record and manual UI verification status.
+
+WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos.
+[WinFsp project and license](https://github.com/winfsp/winfsp).

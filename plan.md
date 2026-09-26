@@ -4,7 +4,8 @@ Status: approved v1 design, with the Windows-local kernel, program execution, an
 interactive shell milestones implemented. The complete distributed v1 runtime
 remains a target; see the verified scope below. Windows-local password-unlocked encrypted volumes and SDK file access are implemented;
 see storage validation and limitations below. The virtual root and writable Windows
-VFS backend are implemented; the actual Windows adapter remains a separate milestone.
+VFS backend are implemented; the separate WinFsp adapter and its acceptance record
+are described at the end of this document.
 
 ## Vision
 
@@ -826,20 +827,21 @@ behavior require their own implementation and acceptance tests.
    Password-unlocked containers, local `/vol` mounts, SDK file access, and crash-safe
    writes come before peers. Host-directory providers and WinFsp are excluded.
 5. **Virtual root and writable backend (Windows implementation).** `/`, `/vol`, directory handles, container schema 2, retained objects, metadata/allocation, deletion dispositions, range locks, filesystem-role mTLS, and negotiated exchange retirement. See the acceptance record below.
-6. **Two linked kernels.** Establish authenticated peers, exchange manifests, and
+6. **Windows export.** Foreground WinFsp adapter against Mainframe.Client; see the
+   implementation and acceptance record below. Cross-client locking and cache
+   coherence are explicitly limited when direct SDK access remains enabled.
+7. **Two linked kernels.** Establish authenticated peers, exchange manifests, and
    route a remote read-only syscall. Both CLIs show the same mainframe identity and
    both nodes. Verify incompatible versions, unauthorized peers, disconnection,
    deadlines, and reconnection without stale registry entries. Register programs
    per host and relay a remote process's I/O through either entry kernel.
-7. **Storage expansion and shared namespace.** Add the host-directory provider
+8. **Storage expansion and shared namespace.** Add the host-directory provider
    alongside encrypted managed volumes, remote handle routing, and owner availability.
    Read/write through either node. Verify permissions,
    concurrent access, owner loss, and stale handles. Complete the two-machine
    weather/bank/cat fixture scenario, including `cat` on A reading storage on B.
-8. **Distributed jobs.** Add durable submission, placement, logs, cancellation,
+9. **Distributed jobs.** Add durable submission, placement, logs, cancellation,
    and explicit failure/retry rules. Verify ambiguous outcomes and worker loss.
-9. **Windows export (separate adapter milestone).** Implement the selected adapter against the same client API.
-   Verify normal editor workflows and that CLI and Windows see the same data.
 10. **Later work, outside v1.** Replication, coordinator failover, snapshots, program
    deployment, hostile-code sandboxing, QUIC, session reattachment, and advanced
    operator tools require separate plans and failure tests.
@@ -995,14 +997,74 @@ never the operator's live volumes or registrations. Shared output is built under
 `bin/Debug/net10.0` and `bin/Release/net10.0`. No WinFsp/Explorer acceptance or Linux
 support is claimed by these tests.
 
-Next is the separate WinFsp adapter: pin and qualify its runtime/.NET binding and
-licenses; use Mainframe.Client without SQLCipher or CLI subprocesses; export a
-selected subtree through drive-letter or directory mount points; implement Windows
-path/security callbacks, NTSTATUS mapping, bounded dispatch, cleanup/close, and
-unmount/disconnect handling. Validate Explorer, copy-in/out, editor replacement,
-sharing and locks concurrent with SDK clients, flush failures, and process loss on
-a real mount. Windows filesystem compatibility is not claimed before that testing.
+The subsequent WinFsp implementation and its acceptance boundary are recorded below.
 Persistent ACLs, alternate streams, reparse points, hard links, compression,
 Windows sparse-file controls, cross-volume rename, and recursive deletion remain
 unsupported. Linux, peers, host-directory providers, and shell filesystem navigation
 remain separate work.
+
+## WinFsp adapter: September 26, 2026
+
+`Mainframe.WinFsp` produces the foreground `mframe-fs` executable. It links the
+installed official WinFsp 2.1.25156 .NET binding, uses the filesystem-role TLS client,
+and exports `/` or a selected directory through an explicit drive letter or new
+directory mount point. The published application contains only the executable,
+Mainframe.Client, Mainframe.Protocol, runtime metadata, symbols, and MIT license;
+neither SQLCipher nor redistributed WinFsp DLLs are included. WinFsp attribution
+is printed in startup/help and included in the README.
+
+Callbacks cover security queries, creation/open/overwrite, paged enumeration and
+single-name lookup, bounded reads/writes, metadata and allocation, flush, rename,
+delete disposition, cleanup and final close. File-node identities are shared by
+resource ID; each Windows open owns a separate backend handle. Eight dispatcher
+threads use per-handle synchronization and cancellable RPC deadlines. Windows
+write handles also permit backend paging reads; Windows enforces the original
+application access, and the backend still requires the operator's volume grants.
+The client exposes connection completion and cancellable version-2 handle close.
+Disconnects unmount without reconnecting or replaying mutations. Ctrl+C begins a
+ten-second RPC drain/cancellation deadline and reports shutdown failures.
+
+The chosen first-release contract allows direct SDK access without a reservation.
+WinFsp Windows locks/sharing do not propagate to SDK clients or other exports.
+Backend SDK locks apply to Windows I/O that reaches the kernel. Metadata caching
+is disabled and cleanup flush/purge is enabled, but external edits and Windows
+application caches have no cross-client notification or coherence guarantee.
+Synthetic security descriptors permit only the current user and SYSTEM; persistent
+ACL changes remain unsupported. See README for the remaining unsupported features.
+
+Directory mounts beneath the current `%TEMP%` are rejected. Qualification on this
+machine reproduced silently ineffective directory creation there in both Mainframe
+and the official `memfs-x64.exe` sample. Workspace directory mounts, directory
+names with spaces, and drive-letter mounts work. Tests use unique disposable
+directories under their build output, outside `%TEMP%`, with isolated certificates
+and encrypted containers; they never use the operator's live state.
+
+Acceptance on Windows x64 / .NET SDK 10.0.401 / WinFsp 2.1.25156:
+
+- `dotnet test Mainframe.slnx -c Debug`: **220 passed**, no skips or failures.
+- `dotnet test Mainframe.slnx -c Release`: **220 passed**, no skips or failures.
+- Each configuration includes 186 existing tests and 34 adapter tests. Real mounts
+  cover copying, Unicode directories, metadata, truncate/append, editor-style
+  replacement, deletion cancellation, paged listings exceeding 256 entries, and
+  file-hash comparison across multi-megabyte transfers. A single mounted connection
+  handles 10,060 uncached file-information operations followed by content verification.
+- Additional cases cover independent Windows processes' sharing/locks, SDK locks,
+  SDK edits followed by reopen, locked-volume unlock, revoked grants/certificates,
+  untrusted credentials, injected flush failure, idle host disconnect, a hidden
+  foreground command receiving real Ctrl+C with an open file, and adapter process
+  termination followed by backend volume unmount/remount and persisted-data checks.
+- Publishing and the published executable's help command were verified; output
+  inspection confirmed that the adapter has no SQLCipher or WinFsp binary payload.
+- Native SQLCipher was built from the existing hash-pinned sources using installed
+  Visual Studio 2026 / MSVC 14.51.36231 via the new explicit toolchain override.
+  The script's default qualified Visual Studio 2022 compiler selection is unchanged.
+
+**Manual GUI acceptance remains pending.** Native Explorer-style filesystem calls
+and editor-style save/replacement sequences are automated and passed, but no claim
+is made that Explorer, Notepad, or VS Code UI workflows were manually exercised.
+The current session did not expose the native desktop automation runtime. Before
+claiming full editor compatibility, browse/copy a synthetic fixture in Explorer and
+open/edit/save/reopen it in both editors, including replacement of an existing file.
+Linux, distributed peers/storage, persistent services, and shell filesystem
+navigation are not part of this adapter milestone. Linked kernels remain the next
+functional roadmap milestone after GUI qualification.

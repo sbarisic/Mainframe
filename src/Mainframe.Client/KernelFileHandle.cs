@@ -105,10 +105,12 @@ public sealed class KernelFileHandle : IAsyncDisposable
         catch (IOException) { }
     }
 
-    public async ValueTask DisposeAsync()
+    public async Task CloseAsync(CancellationToken token = default)
     {
         if (_closed) return;
         _closed = true;
-        await _client.CallAsync("fs.close", new FsHandle(Id), version: 2);
+        await _client.CallAsync("fs.close", new FsHandle(Id), token, version: 2);
     }
+
+    public ValueTask DisposeAsync() => new(CloseAsync());
 }

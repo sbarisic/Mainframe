@@ -12,6 +12,8 @@ public sealed partial class KernelClient : IAsyncDisposable
 {
     private readonly TcpClient tcp;
     private readonly WireConnection wire;
+    /// <summary>Completes when the connection reader stops. Mutations are never replayed.</summary>
+    public Task Completion => wire.Completion;
     public WelcomeResponse Welcome
     {
         get;

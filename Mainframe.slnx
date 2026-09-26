@@ -6,6 +6,7 @@
     <Project Path="examples/Mainframe.Hello/Mainframe.Hello.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/Mainframe.WinFsp/Mainframe.WinFsp.csproj" />
     <Project Path="src/Mainframe.Storage/Mainframe.Storage.csproj" />
     <Project Path="src/Mainframe.Cli/Mainframe.Cli.csproj" />
     <Project Path="src/Mainframe.Client/Mainframe.Client.csproj" />
@@ -15,6 +16,7 @@
     <Project Path="src/Mainframe.Sdk/Mainframe.Sdk.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Mainframe.WinFsp.Tests/Mainframe.WinFsp.Tests.csproj" />
     <Project Path="tests/Mainframe.Fixtures/Mainframe.Fixtures.csproj" />
     <Project Path="tests/Mainframe.Tests/Mainframe.Tests.csproj" />
   </Folder>
