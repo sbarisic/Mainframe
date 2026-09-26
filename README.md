@@ -1,7 +1,9 @@
 # Mainframe
 
 A modular mainframe-style computer environment with a local authenticated kernel.
-Requires the .NET 10 SDK (10.0.400 feature band).
+Requires the .NET 10 SDK (10.0.400 feature band). Building the full solution also
+requires installed WinFsp 2.1.25156 with its .NET binding; see
+[Windows drive and directory adapter](#windows-drive-and-directory-adapter).
 
 See [plan.md](plan.md) for the architecture and milestones, and [packets.md](packets.md)
 for the wire protocol. The current execution milestone is tested on Windows only.
@@ -301,6 +303,14 @@ notices are in `native/SQLCipher-LICENSE.txt` and `native/OpenSSL-LICENSE.txt`.
 dotnet test Mainframe.slnx -c Release
 ```
 
+The full solution includes real WinFsp mount tests and requires the installed
+runtime and .NET binding. To test only the kernel, execution, and storage backend
+without WinFsp, use:
+
+```powershell
+dotnet test tests/Mainframe.Tests/Mainframe.Tests.csproj -c Release
+```
+
 Tests use isolated temporary state and real Windows processes, TLS connections,
 Job Objects and ConPTY. They cover byte-exact streams, argument preservation,
 scoped SDK calls, certificate renewal/recovery, migrations, credit violations,
@@ -364,7 +374,7 @@ filesystem role. It cannot execute programs or administer volumes. Negotiated
 exchange retirement allows connections to outlive 4,096 calls without reconnecting
 or replaying mutations. The Windows adapter is described below; filesystem
 navigation in the mainframe shell remains separate work.
-The final Release suite passes 186 tests, including isolated host crash recovery and
+The backend milestone passed 186 Release tests, including isolated host crash recovery and
 a 257 MiB read after 10,050 queries on one connection. See
 [the backend acceptance record](plan.md#virtual-root-and-writable-backend-september-2026)
 for backend build/test evidence and the subsequent adapter acceptance record.
@@ -434,7 +444,10 @@ dotnet test tests/Mainframe.WinFsp.Tests -c Release
 
 The separate mount suite requires the actual driver and fails explicitly if its
 prerequisites are absent. It uses temporary kernel state, encrypted volumes, and
-mounts. See `plan.md` for the acceptance record and manual UI verification status.
+mounts. The adapter acceptance record reports 220 tests across the full solution
+(186 existing tests and 34 adapter tests) in both Debug and Release. Manual
+Explorer, Notepad, and VS Code UI workflows remain unverified. See
+[the adapter acceptance record](plan.md#winfsp-adapter-september-26-2026).
 
 WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos.
 [WinFsp project and license](https://github.com/winfsp/winfsp).

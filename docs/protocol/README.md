@@ -8,7 +8,10 @@ connection. No unauthenticated operational requests are dispatched.
 
 HELLO requires `unary-rpc`; current clients also offer `streaming-v1`, `execution-v1`,
 `shell-v1`, `storage-v1`, `namespace-v1`, `storage-v2`, and `exchange-retire-v1`. WELCOME selects offered features only. Existing unary clients still
-work. Peers, Windows filesystem adapters, and enrollment are not implemented; local SDK file access is available.
+work. Peers and network enrollment are not implemented. Local SDK file access and
+the separate Windows WinFsp adapter use the same filesystem contracts. The adapter
+authenticates with the operator certificate in the restricted `filesystem` role
+and requires `namespace-v1`, `storage-v2`, and `exchange-retire-v1`.
 
 ## Contracts
 
@@ -193,16 +196,16 @@ before committing. Completion loss may leave an unknown committed outcome.
 The `filesystem` role requires the existing operator certificate and allows only
 filesystem RPCs and kernel queries. It cannot administer volumes, start processes,
 register programs, or enroll identities. Native Windows security descriptors and
-NTSTATUS mapping belong to the future adapter.
+NTSTATUS mapping are implemented in `Mainframe.WinFsp`, outside the wire contracts.
 
-| Portable error | Suggested later Windows mapping |
+| Portable error | Current adapter Windows mapping |
 | --- | --- |
 | `NOT_FOUND` | STATUS_OBJECT_NAME_NOT_FOUND |
 | `PATH_NOT_FOUND` | STATUS_OBJECT_PATH_NOT_FOUND |
 | `ALREADY_EXISTS` | STATUS_OBJECT_NAME_COLLISION |
 | `ACCESS_DENIED` | STATUS_ACCESS_DENIED |
 | `SHARING_VIOLATION` | STATUS_SHARING_VIOLATION |
-| `LOCK_CONFLICT` | STATUS_FILE_LOCK_CONFLICT / STATUS_LOCK_NOT_GRANTED by callback |
+| `LOCK_CONFLICT` | STATUS_FILE_LOCK_CONFLICT |
 | `LOCK_NOT_HELD` | STATUS_RANGE_NOT_LOCKED |
 | `DELETE_PENDING` | STATUS_DELETE_PENDING |
 | `DIRECTORY_NOT_EMPTY` | STATUS_DIRECTORY_NOT_EMPTY |
@@ -211,8 +214,15 @@ NTSTATUS mapping belong to the future adapter.
 | `VOLUME_LOCKED` | STATUS_DEVICE_NOT_READY |
 | `NOT_SUPPORTED` | STATUS_NOT_SUPPORTED |
 
-These mappings are guidance for adapter tests, not a claim of Windows filesystem
-compatibility. See [packets.md](../../packets.md#negotiated-namespace-storage-v2-and-exchange-retirement)
+These mappings cover backend RPC errors. WinFsp enforces Windows sharing and
+range locks within one mount; the adapter opens backend handles with all sharing
+flags and does not forward Windows lock requests. SDK locks still apply to I/O
+that reaches the kernel, but SDK clients and separate mounts do not share Windows
+lock or cache coherence guarantees. See the
+[adapter acceptance record](../../plan.md#winfsp-adapter-september-26-2026) for the
+tested scope and pending manual GUI checks.
+
+See [packets.md](../../packets.md#negotiated-namespace-storage-v2-and-exchange-retirement)
 for retirement boundaries and [storage-write-v2-retire.hex](storage-write-v2-retire.hex)
 for a golden append transfer followed by RETIRE/RETIRE_ACK. Both retirement frames
 have empty payload, nonzero exchange ID, and channel zero.
@@ -224,6 +234,8 @@ handle invalidation after observed authorization loss, and real host termination
 around accepted deletion and replacement. The golden write/retirement transcript
 is generated independently and compared byte-for-byte by the protocol tests.
 
-The final Windows Release suite passes **186 tests** on 2026-09-26. Unknown
-optional JSON fields are ignored during both decoding and volume-queue selection;
+The backend milestone passed **186 Windows Release tests** on 2026-09-26; the
+subsequent adapter acceptance record reports **220 tests** for the full solution
+in both Debug and Release. No new frames or method versions were added for WinFsp.
+Unknown optional JSON fields are ignored during both decoding and volume-queue selection;
 only the selected method's declared path or handle controls routing.

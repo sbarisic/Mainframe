@@ -114,7 +114,7 @@ Current and proposed projects:
 | Mainframe.Host | Persistent kernel (`mframed`), host-side shell, process supervision, endpoints |
 | Mainframe.Client | .NET session/RPC client, authentication, streaming |
 | Mainframe.Sdk | Process bootstrap and typed program kernel calls |
-| Future adapter project | Windows filesystem integration |
+| Mainframe.WinFsp | Foreground Windows drive/directory export (`mframe-fs`) through Mainframe.Client |
 
 The planned CLI is a thin remote terminal. The host-side shell parses mainframe
 commands and starts programs; programs call typed kernel contracts through an SDK.
@@ -790,17 +790,19 @@ These are later features; do not expand the first peer milestone to include them
 
 ## Windows adapter and licensing
 
-Mainframe remains MIT licensed. WinFsp is the leading candidate for a future
-drive-letter or directory export, not a current dependency. Its GPLv3 FLOSS
+Mainframe remains MIT licensed. The separate `Mainframe.WinFsp` adapter uses the
+installed WinFsp 2.1.25156 runtime and .NET binding for drive-letter and directory
+exports. The main CLI does not depend on WinFsp. WinFsp's GPLv3 FLOSS
 exception permits qualifying open-source applications to link to its specified
 DLLs under their own license, subject to its conditions. Include the required
-attribution and repository link in the UI and user-facing documentation when
-integrated. The exception prohibits linking or distributing with proprietary
+attribution and repository link in the UI and user-facing documentation; the
+adapter prints these at startup and the README includes them. The exception
+prohibits linking or distributing with proprietary
 software and allows redistribution of unmodified official installers. Review
 the chosen release and any bindings before distribution.
 
-ProjFS remains an alternative for a directory projection with locally cached
-content. Select the adapter based on the required filesystem semantics.
+ProjFS is not used by this implementation. See the adapter acceptance record below
+for supported operations and the limits on cross-client locking and cache coherence.
 
 ## Implementation milestones and interfaces
 
@@ -1068,3 +1070,11 @@ open/edit/save/reopen it in both editors, including replacement of an existing f
 Linux, distributed peers/storage, persistent services, and shell filesystem
 navigation are not part of this adapter milestone. Linked kernels remain the next
 functional roadmap milestone after GUI qualification.
+
+Local pull verification of commit `46c91f5` on September 26, 2026: the Release
+kernel/execution/storage suite passed **186 tests**, with no failures or skips.
+The full-solution command returned a build error for `Mainframe.WinFsp` because
+this checkout's Windows machine has no registered WinFsp installation or .NET
+binding. The 34 adapter tests could not run here; the 220-test results above are
+the implementation commit's acceptance record, not a fresh local verification.
+No driver was installed and no live volumes or registrations were changed.

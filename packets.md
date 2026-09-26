@@ -1,6 +1,7 @@
 # Mainframe v1 wire protocol design
 
-Status: approved v1 design with the Windows-local execution subset implemented.
+Status: approved v1 design with Windows-local execution, encrypted storage, the
+virtual namespace, and the filesystem-role client used by the WinFsp adapter implemented.
 The rest of v1 remains a target. See [plan.md](plan.md) for milestone boundaries
 and `docs/protocol` for implemented schemas and golden wire fixtures.
 
@@ -9,13 +10,22 @@ and `docs/protocol` for implemented schemas and golden wire fixtures.
 The host listens on IPv4 loopback with TLS 1.3. Operator connections use mTLS and
 the `terminal` role. The `program` role uses server-authenticated TLS, followed by
 restricted AUTH using a single-use inherited-pipe credential. Anonymous clients
-cannot dispatch requests; enrollment and peers remain unavailable.
+cannot dispatch requests; enrollment and peers remain unavailable. The `filesystem`
+role uses operator mTLS and permits filesystem calls and kernel discovery only.
 
-The connector requires `unary-rpc` and offers `streaming-v1`, `execution-v1`, and
-`shell-v1`. WELCOME selects only offered features. Unary clients remain compatible.
+The connector requires `unary-rpc` and offers `streaming-v1`, `execution-v1`,
+`shell-v1`, `storage-v1`, `namespace-v1`, `storage-v2`, and `exchange-retire-v1`.
+WELCOME selects only offered features. Unary clients remain compatible.
 The kernel implements the three kernel queries plus program registration/list/removal,
 host-root administration, shell open/command, and process start/resize/interrupt.
 See the [implemented contracts](docs/protocol/README.md) for argument/result types.
+
+The separate `mframe-fs` Windows adapter requires `namespace-v1`, `storage-v2`, and
+`exchange-retire-v1` on its filesystem connection. It uses existing RPCs and
+streams without WinFsp-specific frames, methods, or schema changes. Windows path,
+security-descriptor, and NTSTATUS conversion remain in the adapter. Windows
+sharing/locks and caches do not fully coordinate with direct SDK clients or other
+exports; see [the adapter acceptance record](plan.md#winfsp-adapter-september-26-2026).
 
 Connections multiplex up to 128 exchanges with increasing odd connector IDs;
 acceptor-originated IDs use even numbers. No operation is replayed. Ordinary client
